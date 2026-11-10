@@ -15,7 +15,7 @@
   set +e
   (
     set -euo pipefail
-    # 通知真源在 step 顶层 source 一次（勿挪进函数体，理由见 workbuddy 步骤同名注释 / 规范 4.4）
+    # 通知真源在 step 顶层 source 一次（勿挪进函数体，理由见 workbuddy 步骤同名注释 / 规范 · 通知函数的正确接法）
     source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
     TRAE_DATA=/dropbox/self-hosted/trae2api
@@ -66,7 +66,7 @@
         # TRAE_CREDS 变量保留（采集处仍在产出，供将来其它用途），仅不再渲染。
         # 账号池：与 wb_notify 同构的「条目 + 子行」形态。子行必须用 tree_sub
         # 前缀手拼 —— tree_lines 把每行都当兄弟条目，子行经它会渲染成 ├─/└─，
-        # 与条目平级（规范 4.2 二层列表：子行与条目正文同列）。
+        # 与条目平级（规范 · 清单明细的二层列表：子行与条目正文同列）。
         # 错峰签到（主人 09-25 定）：checkin 先零请求落盘全部账号的排程行
         # （skipped=scheduled/cooldown/already，带 planned_at），真实签到完成后
         # 追加结果行 —— 同一 uid 会有两行，按 uid 取末行：有结果显示结果，
@@ -131,8 +131,8 @@
         # 数据源：checkin-state.json（连败/上次成功）+ state.json（自愈换代/退避）。
         # 换代 gen>0 是 9074 自愈动过手的证据（不是故障），故单列且不加 ⚠️。
         # 2026-10-04 主人：裸写「自愈换代 gen 1」外人读不懂 → 条目改白话
-        # 「签到设备换代 +1」（主人终版措辞），标题改「N 个账号有备注」
-        # （N 是账号数不是失败数，此前被误读为「1 个失败」）。
+        # 「签到设备换代 +1」（主人终版措辞），分节计数写 `· N`，
+        # 「N 个账号有备注」下沉为说明段（N 是账号数不是失败数，避免被误读为「N 个失败」）。
         local _ck_state _st_state _hrows _hu _hfc _hlcd _hgen _hrc _hnick _hinfo
         _ck_state="${TRAE_DATA}/data/checkin-state.json"
         _st_state="${TRAE_DATA}/data/state.json"
@@ -160,7 +160,8 @@
           done <<< "$(jq -r 'keys[]' "$_ck_state" 2>/dev/null)"
         fi
         if [ "$_hn" -gt 0 ]; then
-          tg_add_section _msg "🩺 签到健康 · ${_hn} 个账号有备注"
+          tg_add_section _msg "🩺 签到健康 · ${_hn}"
+          tg_add_note _msg "以上账号有签到备注"
           tg_add_block _msg "$(tree_lines "${_hrows%$'\n'}")"
           tg_append _msg $'\n'
         fi
@@ -169,7 +170,7 @@
         # 取数失败时为空，
         # 整段跳过（与凭据段同口径）。section 计数与「🔑 凭据 · N」同构。
         if [ -n "${RATES_TXT:-}" ]; then
-          tg_add_section _msg "📊 模型倍率 · 模型数量${RATES_N:-0}"
+          tg_add_section _msg "📊 模型倍率 · 模型数量 ${RATES_N:-0}"
           tg_add_pre _msg "$RATES_TXT"
           # tg_add_pre 内部 <pre> 包裹 + 转义；段尾补空行对齐账号池段
           tg_append _msg $'\n'
@@ -453,7 +454,7 @@
       _ok=$(jq -sr 'group_by(.uid) | map(last) | [.[] | select((.err // "") == "" and ((.claimed // false) == true or (.checked_in // false) == true or (.skipped // "") == "already"))] | length' "$CHECKIN_JSONL" 2>/dev/null || echo 0)
       _wait=$(jq -sr 'group_by(.uid) | map(last) | [.[] | select((.err // "") == "" and (.claimed // false) != true and (.checked_in // false) != true and ((.skipped // "") == "scheduled" or (.skipped // "") == "cooldown"))] | length' "$CHECKIN_JSONL" 2>/dev/null || echo 0)
       _fail=$(jq -sr 'group_by(.uid) | map(last) | [.[] | select((.err // "") != "")] | length' "$CHECKIN_JSONL" 2>/dev/null || echo 0)
-      # 计数只列非零项（telegram-notify 规范 2.5 / 5.4）：
+      # 计数只列非零项（规范 · 计数与量化）：
       # 「待签 0 · 失败 0」这类零计数与 🟢 已就绪的标题自相矛盾，且把常态噪音
       # 顶到结论行最显眼的位置。共 N 是分母、始终保留（读者需要知道池子多大）。
       _parts="已就绪"

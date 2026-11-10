@@ -105,7 +105,7 @@ if [ -n "${HEALTH_SIMULATE_FAIL:-}" ]; then
   for _f in "${_sim[@]}"; do fails+=("❌ $_f"); done
 fi
 
-now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+now=$(date -u '+%Y-%m-%d %H:%M UTC')
 signature=$(printf '%s\n' "${fails[@]:-}" | md5sum | cut -d' ' -f1)
 prev_sig=""; prev_at=0
 if [ -f "$STATE" ]; then
@@ -146,19 +146,19 @@ host=$(hostname 2>/dev/null || echo runner)
 # 版式真源：docs/telegram-notify.md
 #   - 机器值（主机名/Run ID）走 tg_add_path（<code> 等宽）
 #   - 清单走 tg_add_section + tree_lines（唯一条目前缀），不用 tg_add_block 铺平文本
-#   - 原始输出才用 <pre>（4.7 告警形态），且作为正文最后一块
-#   - 收尾区一律 tg_add_footer
+#   - 原始输出才用 <pre>（规范 · 告警通知），且作为正文最后一块
+#   - 常驻服务没有 run 上下文，收尾用 🕒 报告时刻（规范 · 收尾区「常驻服务例外」）
 #   - 计数放分节标题 " · N"
 msg=""
 if [ ${#fails[@]} -eq 0 ]; then
+  tier=""
   tg_add_title msg "✅ 系统健康恢复"
   tg_add_path msg "主机" "$host"
-  tg_add_kv msg "时间" "$now"
   tg_add_note msg "此前异常的检查项已全部恢复正常"
 else
+  tier="alert"
   tg_add_title msg "🚨 系统级故障 · ${#fails[@]} 项"
   tg_add_path msg "主机" "$host"
-  tg_add_kv msg "时间" "$now"
   tg_add_section msg "🔍 异常 · ${#fails[@]}"
   _lines=""
   for f in "${fails[@]}"; do
@@ -167,7 +167,12 @@ else
   tg_add_block msg "$(tree_lines "${_lines%$'\n'}")"
   tg_add_kv msg "其余检查项" "${#ok_notes[@]} 项正常"
 fi
-tg_add_footer msg
+# 常驻服务收尾：报告时刻，不用 ⏱ 已运行
+case "$msg" in
+  *$'\n') tg_append msg $'\n' ;;
+  *) tg_append msg $'\n\n' ;;
+esac
+tg_append msg "🕒 ${now}"$'\n'
 
 if [ "$PRINT" = 1 ]; then
   printf '%s\n' "$msg"

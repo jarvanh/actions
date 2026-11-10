@@ -266,7 +266,7 @@ jobs:
           # 收尾区接线（规范 · 收尾区）：本 step 有 OpenList 凭据通知，需要运行日志链接
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          # 真源只在 step 顶层 source 一次（规范 4.4）——此前在 main() 函数体内 source
+          # 真源只在 step 顶层 source 一次（规范 · 通知函数的正确接法）——此前在 main() 函数体内 source
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
           main() {
             sudo mkdir -p /opt/openlist
@@ -1007,7 +1007,7 @@ jobs:
           tg_add_kv START_MSG "直链源" "$SRC_NAME"
           tg_add_kv START_MSG "网盘快捷方式" "$OD_LINE"
           tg_add_kv START_MSG "取链自检" "$MAP_CN"
-          tg_add_kv START_MSG "时间" "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+          tg_add_kv START_MSG "时间" "$(date -u '+%Y-%m-%d %H:%M UTC')"
           # 说明行（tg_add_note，段前空行）："网盘快捷方式"不是通用词，补一句人话解释
           tg_add_note START_MSG "网盘快捷方式 = 网盘里指向别处文件的 .url 文件；本服务会自动跟随它换成可直接播放的链接"
           tg_add_footer START_MSG
@@ -1304,7 +1304,7 @@ jobs:
               *) [ -n "$1" ] && printf '%s' "$1";;
             esac
           }
-          # 体积格式化直接用真源 format_bytes（"5.500 GiB"，规范 5.2：bash 侧只有
+          # 体积格式化直接用真源 format_bytes（"5.500 GiB"，规范 · 大小：bash 侧只有
           # 一份实现，source 了真源的通知点不再自造）——此前本文件的 fmt_size 输出
           # "5.5 GB"（一位小数、SI 单位），已删
           join_parts() { local out= p; for p in "$@"; do [ -n "$p" ] && out="${out:+${out} · }${p}"; done; printf '%s' "$out"; }
@@ -1426,11 +1426,11 @@ jobs:
             if [ -n "$season" ]; then se="S$(two_digit "$season" || printf '?')"; fi
             if [ -n "$episode" ]; then se="${se}E$(two_digit "$episode" || printf '?')"; fi
             if [ "$type" = "Episode" ] && [ -n "$series" ]; then
-              # emoji 一律不套标签（规范 · 取值行口径）
-              title="🎬 $(escape_html "$series")"
+              # 标题交给 tg_add_title 统一转义，这里保持裸文本避免二次转义
+              title="🎬 ${series}"
               [ -n "$se" ] && title="${title} ${se}"
             else
-              title="🎬 $(escape_html "${n:-未知}")"
+              title="🎬 ${n:-未知}"
               [ -n "$year" ] && title="${title} (${year})"
             fi
 
@@ -1520,7 +1520,8 @@ jobs:
 
             # 日志侧只记片名（公开仓库，绝不落直链）；TG 私密消息里才附带直链
             echo "🎬 播放 [$kind] ${n:-未知} (item $iid)"
-            text="${title}"$'\n'"${TG_SEP}"
+            text=""
+            tg_add_title text "$title"
             # kv 值按 规范 · 取值行口径（机器返回值 → <code>；
             # 结论值/状态/计数/数值 → 裸文本 + 转义）
             [ -n "$meta" ] && text="${text}"$'\n'"规格：${meta}"
@@ -2907,7 +2908,7 @@ jobs:
           # 备份结果：运行期增量 + 收尾全量的最终结论（backup step 写入 /tmp/emby-backup-result）
           tg_add_kv msg "数据备份" "$(cat /tmp/emby-backup-result 2>/dev/null || echo 未知)"
           tg_add_kv msg "播放客户端" "$CLIENTS"
-          tg_add_kv msg "时间" "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+          tg_add_kv msg "时间" "$(date -u '+%Y-%m-%d %H:%M UTC')"
           # 说明行（tg_add_note，段前空行）：统计里的两个内部口径补一句人话
           if [ -n "$OD_NOTE" ]; then tg_add_note msg "$OD_NOTE"; fi
           # 统一收尾区（⏱ 已运行 X · 🔗 运行日志；读 step env 的 TG_RUN_URL，时长走开机时刻兜底）

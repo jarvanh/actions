@@ -21,7 +21,7 @@
     # 通知真源在 step 顶层 source 一次。**不要挪进 wb_notify 函数体**：
     # 该函数在 $( ) / 管道里跑（子 shell），子 shell 内 source 不影响父 shell 的
     # 函数表，会把调用点对 send_tg 的本地覆写还原掉；而且子 shell 里 `local`
-    # 管不住父 shell 的变量（规范 4.4）。
+    # 管不住父 shell 的变量（规范 · 通知函数的正确接法）。
     source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
     # workbuddy-gateway（jarvanh/workbuddy-gateway）：纯 Go 单二进制的本地 AI 代理网关。
@@ -110,7 +110,7 @@
         # 并成第一个子行，第 7 列（免费模型名，可能很长）另起一个独立子行
         # 「免费模型 N · <code>名</code> · <code>名</code>」—— 与额度等短字段混在一行会被撑爆。
         # 子行必须用 tree_sub 前缀手拼 —— tree_lines 把每行都当兄弟条目，
-        # 子行经它会渲染成 ├─/└─，与条目平级（规范 4.2 二层列表：子行与条目正文同列）。
+        # 子行经它会渲染成 ├─/└─，与条目平级（规范 · 清单明细的二层列表：子行与条目正文同列）。
         if [ -n "${WB_POOL:-}" ]; then
           local _readyflag _cf _st _state _acdl _quota _fm _cdl _tok _n_acc _rows _i _sub _x _last
           local _names _n_names _m _mline
@@ -221,7 +221,7 @@
         # 既不砍数据，也避免主消息在客户端被折叠得太长。
         WB_RATES_BLOCK=""
         if [ -n "${WB_RATES_TXT:-}" ]; then
-          WB_RATES_BLOCK="$(tg_add_title WB_RATES_BLOCK "📊 workbuddy-gateway 模型倍率 · 模型数量${WB_RATES_N:-0}${WB_RATES_FREE_TAG:-}"; tg_add_pre WB_RATES_BLOCK "$WB_RATES_TXT"; tg_add_footer WB_RATES_BLOCK; printf '%s' "$WB_RATES_BLOCK")"
+          WB_RATES_BLOCK="$(tg_add_title WB_RATES_BLOCK "📊 workbuddy-gateway 模型倍率 · 模型数量 ${WB_RATES_N:-0}${WB_RATES_FREE_TAG:-}"; tg_add_pre WB_RATES_BLOCK "$WB_RATES_TXT"; tg_add_footer WB_RATES_BLOCK; printf '%s' "$WB_RATES_BLOCK")"
         fi
         # 用量 + 流水（看板独有，2026-10-05 补进通知）：只渲染本网关自己，
         # 避免 wb 通知里出现 zcode 数据（语义串台）。调 board.py 的 CLI 子命令 ——

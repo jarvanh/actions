@@ -1443,7 +1443,8 @@ send_sync_warning() {
         changed) _mk="↕ 文件还在、字节数变了" ;;
         *) _mk="❓ 未知" ;;
       esac
-      tg_add_entry _mh "${_sz} · ${_p} → ${_mk}"
+      # 路径与大小是机器值 → <code>；状态是自然语言 → 裸文本元数据
+      tg_add_entry_codes _mh "$_p" "$_sz" "$_mk"
     done <<< "$_mrep"
     tg_append msg "$(tree_fold "${_mh%$'\n'}")"$'\n'
     tg_add_note msg "✅ 备份还在 = 目标端仍有副本，只是源端删了，没丢数据；🚨 备份也没有 = 两端皆无，需人工确认"
@@ -1512,7 +1513,7 @@ send_sync_skipped() {
   tg_add_kv msg "跳过窗口" "${skip_window_hours} 小时内"
   tg_add_path msg "源端" "$source_path"
   tg_add_path msg "目标" "$dest_path"
-  tg_add_section msg "🕒 上次同步"
+  tg_add_section msg "🗓 上次同步"
   # ISO 原始戳人性化（2026-09-05T11:34:19Z → 2026-09-05 11:34 UTC），
   # 解析失败保留原值；"距今"并作同行的 " · N 小时前"，少一行 kv
   local _last_fmt

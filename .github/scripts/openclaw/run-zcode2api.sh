@@ -19,7 +19,7 @@
   set +e
   (
     set -uo pipefail
-    # 通知真源在 step 顶层 source 一次（勿挪进函数体，理由见 workbuddy 步骤同名注释 / 规范 4.4）
+    # 通知真源在 step 顶层 source 一次（勿挪进函数体，理由见 workbuddy 步骤同名注释 / 规范 · 通知函数的正确接法）
     source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
     Z2A_REPO="https://github.com/jarvanh/zcode2api.git"
@@ -172,7 +172,7 @@
       hidden_total="$(printf '%s' "$json" | jq -r '[.accounts[] | select((.quota // {} | length) == 0)] | length' 2>/dev/null || true)"
       # 标题计数用**已展示**的条目，避免「账号池 10」却只列 1 条的口径打架；
       # 被略去的条数单独标出，主人仍知道池子里还有多少无额度账号。
-      Z2A_POOL_TITLE="💳 账号池 · ${shown_total}（active ${shown_active}）"
+      Z2A_POOL_TITLE="💳 账号池 · ${shown_total}（可用 ${shown_active}）"
       if [ "${hidden_total:-0}" -gt 0 ] 2>/dev/null; then
         Z2A_POOL_TITLE="${Z2A_POOL_TITLE} · 略 ${hidden_total} 无额度"
       fi
@@ -180,9 +180,9 @@
       while IFS=$'\t' read -r name prov mode st plan_name err quota_json; do
         n=$((n + 1))
         if [ "$n" -eq "${shown_total}" ]; then
-          prefix='<code>  └─ </code>'; subpre="$(tree_sub 1)"
+          prefix="$(tree_conn 1)"; subpre="$(tree_sub 1)"
         else
-          prefix='<code>  ├─ </code>'; subpre="$(tree_sub 0)"
+          prefix="$(tree_conn 0)"; subpre="$(tree_sub 0)"
         fi
         local chan st_cn
         case "$prov/$mode" in
@@ -455,7 +455,8 @@
         # 上报直至解除（2026-10-24 主人要求：风控要像模型冷却一样通知）
         risk_ban)
           tg_add_title _m "🔴 zcode2api 账号池风控停用 · 需人工解封"
-          tg_add_kv _m "结论" "z.ai 风控封禁（3012/unusual activity）已停用 ${Z2A_RISK_BAN_COUNT} 个账号：${Z2A_RISK_BAN_LIST}；账号额度满格，并非额度耗尽"
+          tg_add_kv _m "结论" "z.ai 判定异常活动（错误码 3012），已停用 ${Z2A_RISK_BAN_COUNT} 个账号；账号额度满格，并非额度耗尽"
+          tg_add_path _m "停用账号" "${Z2A_RISK_BAN_LIST}"
           tg_add_kv _m "说明" "不会自动恢复：需到 z.ai 后台确认解封后启用（解封后可让我调 admin API 启用并实测）；解除前 GLM-5.3 持续 503"
           ;;
         # unavailable = 网关 503 no_available_account / 请求级死线：账号池全冷却
@@ -555,7 +556,8 @@
         fi
         # 池内仍有风控停用账号时，就绪卡也必须点名（不能只靠账号池明细一行小字）
         if [ "$Z2A_RISK_BAN_COUNT" -gt 0 ]; then
-          tg_add_kv _m "⚠️ 风控停用" "${Z2A_RISK_BAN_COUNT} 个：${Z2A_RISK_BAN_LIST} · 需 z.ai 后台解封后启用"
+          tg_add_kv _m "风控停用" "${Z2A_RISK_BAN_COUNT} 个 · 需 z.ai 后台解封后启用"
+          tg_add_path _m "停用账号" "${Z2A_RISK_BAN_LIST}"
         fi
         tg_add_path _m "代码" "$Z2A_REPO"
         # 用量 + 流水（看板独有，2026-10-05 补进 zcode 通知，与 wb/trae 同口径）：

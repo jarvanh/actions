@@ -236,14 +236,9 @@ check_openlist_storage_health() {
   case "$first_seen" in ''|*[!0-9]*) first_seen=0 ;; esac
   if [ "$first_seen" -gt 0 ]; then
     dur=$(( now - first_seen ))
+    # 复用真源三段式时长（规范 · 时长 第 1–3 层），不再自写一份
     local dur_txt
-    if [ "$dur" -ge 3600 ]; then
-      dur_txt="$(( dur / 3600 )) 小时 $(( (dur % 3600) / 60 )) 分"
-    elif [ "$dur" -ge 60 ]; then
-      dur_txt="$(( dur / 60 )) 分钟"
-    else
-      dur_txt="${dur} 秒"
-    fi
+    dur_txt="$(tg_format_duration "$dur")"
     fs_txt=$(date -u -d "@${first_seen}" '+%Y-%m-%d %H:%M' 2>/dev/null) || fs_txt=""
     if [ -n "$fs_txt" ]; then
       tg_add_kv msg "已持续" "${dur_txt}（首次发现 ${fs_txt} UTC）"

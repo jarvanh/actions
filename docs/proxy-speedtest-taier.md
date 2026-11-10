@@ -196,7 +196,7 @@ if CONFIG['TAIER_INCLUDE_REGEX']:
 - **拿到可信的表** ⇒ 「表里没有该节点」是 mihomo 的**明确判死结论**（它对连不上的节点
   **不给延迟**，不是给 0），计入 `❌ 失败`，错误串带「测活未通过：」前缀以便读者分清
   「测活阶段就死」与「测速阶段失败」。版式约定见
-  [通知规范 · 2.8 测速三套](telegram-notify.md#28-测速三套githubscriptsproxy-speedtest)。
+  [台账 1.6](telegram-notify-registry.md#16-测速三套githubscriptsproxy-speedtest)。
 
 ⚠️ **为什么必须盯覆盖度**（2026-09-25 加闸门）：mihomo 的组测速在大池下**只返回已测完的
 那批**，不是全量覆盖。三轮实测：

@@ -42,6 +42,7 @@
 #   send_tg_chunked <text>             分片发送（长消息用）
 #   escape_html / tg_append / tg_add_title / tg_add_kv / tg_add_path /
 #   tg_add_section / tg_add_note / tg_add_block / tg_add_footer
+#   format_bytes / tg_format_ms / tg_format_duration（大小与时长口径）
 #   tree_conn / tree_sub / tree_lines / tree_code_fold / tree_fold（树形条目与折叠；
 #     tree_code_fold 收裸文本、tree_fold 收已构建条目流，勿互换）
 
@@ -74,7 +75,7 @@ TG_SEP='━━━━━━━━━━━━━━━━━━'
 # 全库唯一实现。此前 openlist / tg-channel / workflow 内联各有一份同义实现
 # （format_bytes / human_bytes / 内联 awk），改口径要四处同步、极易漏改，
 # 故收敛到这里——凡是 source 了本文件的通知点都直接用它。
-# python 侧（内嵌段与独立 .py）无法调用 bash 函数，仍保留同义实现，见规范 5.2 节。
+# python 侧（内嵌段与独立 .py）无法调用 bash 函数，仍保留同义实现，见规范 · 大小。
 format_bytes() {
   awk -v b="$1" 'BEGIN {
     split("B KiB MiB GiB TiB PiB", u)
@@ -186,6 +187,24 @@ tg_add_block() {
   esac
 }
 
+# 秒数 → 三段式时长（规范 · 时长 第 1–3 层）:
+#   ≥1 小时 → "X 小时 Y 分"（分钟不补零）；≥1 分钟 → "X 分钟"；
+#   不足 1 分钟 → "X.XX 秒"（两位小数，整数输入输出 12.00 秒）。
+# 收尾区与正文共用同一实现，避免各脚本再各写一份（sync_trend 等正文耗时也走它）。
+# 空值 / 非法输入按 0 处理，调用方据此决定是否整行跳过。
+tg_format_duration() {
+  local elapsed="${1:-0}"
+  case "$elapsed" in ''|*[!0-9]*) elapsed=0 ;; esac
+  local mins=$((elapsed / 60))
+  if [ "$mins" -ge 60 ]; then
+    printf '%s 小时 %s 分' "$((mins / 60))" "$((mins % 60))"
+  elif [ "$mins" -gt 0 ]; then
+    printf '%s 分钟' "$mins"
+  else
+    printf '%.2f 秒' "$elapsed"
+  fi
+}
+
 # 统一收尾区（全库唯一收尾形态，自带与正文间的空行）:
 #   "\n⏱ 已运行 X 小时 Y 分 · 🔗 <a href="TG_RUN_URL">运行日志</a>\n"
 # 时长来源优先级:
@@ -216,16 +235,7 @@ tg_add_footer() {
   fi
   [ "$elapsed" -ge 0 ] || elapsed=0
   if [ "$elapsed" -gt 0 ]; then
-    local mins=$((elapsed / 60)) dur
-    if [ "$mins" -ge 60 ]; then
-      dur="$((mins / 60)) 小时 $((mins % 60)) 分"
-    elif [ "$mins" -gt 0 ]; then
-      dur="${mins} 分钟"
-    else
-      # 秒统一两位小数（与条目内单文件耗时 12.34 秒 同形态；整数输入输出 12.00 秒）
-      dur="$(printf '%.2f' "$elapsed") 秒"
-    fi
-    line="⏱ 已运行 ${dur}"
+    line="⏱ 已运行 $(tg_format_duration "$elapsed")"
   fi
   if [ -n "${TG_RUN_URL:-}" ]; then
     [ -n "$line" ] && line+=" · "

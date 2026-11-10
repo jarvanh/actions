@@ -13,8 +13,8 @@
 
 - **规范真源 `docs/telegram-notify.md`：动通知前必读，实现必须与它一致。**
   - 实现与规范不一致 → 改实现；规范本身过时或有误 → **先改规范，再同步实现**（依赖方向恒为 文档 → 实现，不反向）。
-  - 三处硬约束没有例外条款：规范 · 发送层（一律 HTML、动态内容必须转义、429 按 `retry_after` 重试最多 5 次、400 不重发直接暴露、已 source 发送层不得 curl 直发）、规范 · 收尾区与 `TG_RUN_URL` 接线、规范 · 8回归基线。
-- 三套实现真源：bash `.github/scripts/telegram/tg_notify.sh`、pwsh `.github/scripts/telegram/tg_notify.ps1`、python `.github/scripts/proxy-speedtest/speedtest_common.py`。**新增或修改助手要三处同步**（大小/时长格式另有三处同义实现，规范 · 大小写法）。
+  - 三处硬约束没有例外条款：规范 · 发送层（一律 HTML、动态内容必须转义、429 按 `retry_after` 重试最多 5 次、400 不重发直接暴露、已 source 发送层不得 curl 直发）、规范 · 收尾区与 `TG_RUN_URL` 接线、规范 · 验证与交付（回归基线）。
+- 三套实现真源：bash `.github/scripts/telegram/tg_notify.sh`、pwsh `.github/scripts/telegram/tg_notify.ps1`、python `.github/scripts/proxy-speedtest/speedtest_common.py`。**新增或修改助手要三处同步**（大小/时长格式另有三处同义实现，规范 · 大小）。
 - 全库禁用 `<b>` / `<i>`；条目一律 `├─/└─` 树形；kv 一律全角冒号。
 
 ### 可用 skill

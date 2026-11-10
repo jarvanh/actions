@@ -1790,13 +1790,13 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
         _title_emoji = '⚠️'
     # 来源标签（PROXY_SPEEDTEST_LABEL）：编排层 proxy-speedtest-gistnodes 调用时传
     # 「gist 节点」，标题变成「gist 节点 · Gitee 测速完成」。同一套测速会被定时轮和 gist
-    # 抓取轮分别触发，标题不区分的话读者分不清通知来自哪一轮（规范 · 3.1）。
+    # 抓取轮分别触发，标题不区分的话读者分不清通知来自哪一轮（规范 · 标题与分隔线）。
     _label = (merged_env().get('PROXY_SPEEDTEST_LABEL') or '').strip()
     _title_prefix = f'{_label} · ' if _label else ''
     summary_lines = [
         f'{_title_emoji} {_title_prefix}Gitee 测速完成',
         sep,
-        f'🕒 起止：{esc(started_text)} ~ {esc(ended_text)} · 耗时 {esc(duration_cn)}',
+        f'🗓 起止：{esc(started_text)} ~ {esc(ended_text)} · 耗时 {esc(duration_cn)}',
         f'📊 节点：共 {len(speed_results)} 个 · 可用 {len(ok_results)} 个',
         # 到点收摊 / 运行中中止：**不是失败**（退出码仍 0），但必须说清「本轮没测完」。
         # 位置紧跟「📊 节点」：与 taier / CDN 两套一致（三套通知是同一份交付物，

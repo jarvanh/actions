@@ -105,7 +105,7 @@ sep_len=$(printf '%s' "$TG_SEP" | wc -m | tr -d ' ')
 [ "$sep_len" -eq 18 ]; check "分隔线为 18 条（实测 ${sep_len}）" $?
 # 注意：写 ━━\{18\} 会被解析成「1 个字面 ━ + 后一个重复 18 次」= 19 条，必须只写一个
 printf '%s' "$msg" | grep -q '^━\{18\}$'; check "标题分隔线渲染正确" $?
-# 树形前缀断言必须写真源渲染的完整串（规范 4.2：前缀统一包等宽 <code>，2026-09-22 起）；
+# 树形前缀断言必须写真源渲染的完整串（规范 · 清单明细：前缀统一包等宽 <code>）；
 # 别照规范样例区的裸前缀抽象写法抄——曾照抄导致整组假红
 printf '%s' "$msg" | grep -q '^<code>  ├─ </code><code>media/大文件A.mkv</code> · '; check "条目为 ├─ 树形且主体等宽" $?
 printf '%s' "$msg" | grep -q '&amp;amp;'; [ $? -ne 0 ]; check "无二次转义（&amp;amp;）" $?

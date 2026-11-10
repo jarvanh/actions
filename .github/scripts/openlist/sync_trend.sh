@@ -144,20 +144,9 @@ trend_record_and_notify() {
   _trend_send_summary "$_local"
 }
 
-# 通知内时长一律中文形态（规范 · 时长写法 时长五层，禁英文紧凑格式 2h15m；
-# 紧凑写法只留在 RESULT_JSON/日志，不进通知；不足 1 分钟用两位小数秒）
-_trend_fmt_duration() {
-  local s="${1:-0}" h m
-  [[ "$s" =~ ^[0-9]+$ ]] || s=0
-  h=$((s / 3600)); m=$(((s % 3600) / 60))
-  if [ "$h" -gt 0 ]; then
-    echo "${h} 小时 ${m} 分"
-  elif [ "$m" -gt 0 ]; then
-    echo "${m} 分钟"
-  else
-    printf '%.2f 秒' "$s"
-  fi
-}
+# 通知内时长一律中文形态（规范 · 时长 五层，禁英文紧凑格式 2h15m；
+# 紧凑写法只留在 RESULT_JSON/日志，不进通知）。正文耗时复用真源
+# tg_format_duration，不再自造第四份三段式实现。
 
 _trend_send_summary() {
   local _local="$1" _py_out
@@ -230,12 +219,12 @@ PYEOF
 
   local msg=""
   tg_add_title msg "📈 同步趋势"
-  tg_add_section msg "本轮"
-  tg_add_kv msg "净传 / 历时" "$(format_bytes "$_this_tr") / $(_trend_fmt_duration "$_this_du")"
+  tg_add_section msg "📊 本轮"
+  tg_add_kv msg "净传 / 历时" "$(format_bytes "$_this_tr") / $(tg_format_duration "$_this_du")"
   # 文件口径（字节口径不可得时唯一的"还差多少"线索）
   tg_add_kv msg "缺失 / 修复成功（文件）" "${_miss_files} / ${_fix_files}"
   if [ "$_rounds" -gt 1 ]; then
-    tg_add_section msg "近 ${_rounds} 轮"
+    tg_add_section msg "🧮 近 ${_rounds} 轮"
     tg_add_kv msg "平均净传速率" "$(format_bytes "${_rate%.*}")/h"
     if [ -n "$_rem" ]; then
       tg_add_kv msg "剩余未传" "$(format_bytes "$_rem")"

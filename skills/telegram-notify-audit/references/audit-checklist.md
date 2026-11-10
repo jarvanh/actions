@@ -1,7 +1,8 @@
 # Telegram 通知版式核对清单
 
-本文件是 SKILL.md 第 1、3、5 步的输入。第 3 节起的轮次结论是各轮核对时点的实测值，
-**会随实现变化**——数字对不上时先怀疑数字腐化，回代码确认后再改本文件。
+本文件是 `skills/telegram-notify-audit` 第 1、3、5 步的输入：机械扫描项、四域判据、
+易误判项、回归基线与 flake 名单。**只记录可复用的判据与基线，不记录「哪一轮改了什么」**
+（过程记录会让文件迅速腐化）。
 
 ## 1. 机械扫描项（Grep 工具，path 显式传 `.github`）
 
@@ -11,13 +12,16 @@
 | 2 | 平铺条目 | `•` | 零使用，仅注释提及 |
 | 3 | 半角冒号 kv | `[一-龥]:[^/:= ]` | 仅非通知代码（echo/grep 表达式） |
 | 4 | 紧凑时长 / 高精度浮点 / ISO 直出 | `[0-9]+h ?[0-9]+m\|[0-9]\.[0-9]{4,} 秒\|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}` | 仅注释、测试夹具、非通知数据 |
-| 5 | curl 直发 | `curl .*(sendMessage\|/bot)` | 6 处 = 3 类：发送层自身（`tg_notify.sh` `send_tg` 内两处）、进度面板 message_id 与 deleteMessage（`openlist/telegram.sh`）、`sendDocument`（`sync_notify.sh`）——不给行号（会漂），腐化时以 grep 重数为准 |
-| 6 | 分隔线 | `TG_SEP *=\|━━━` | 四套同值 18 条（bash 真源 / ps1 `0x2501*18` / python `'━'*18` / sync_to_tg 内嵌） |
+| 5 | curl 直发 | `curl .*(sendMessage\|/bot)` | 只允许三类：发送层自身（`tg_notify.sh` 两处、`speedtest_common.py` 一处）、进度面板 `message_id` 与 `deleteMessage`（`openlist/telegram.sh`）、`sendDocument`（`sync_notify.sh`）。`ensure-miniapp-menu.sh` 调 Bot API 配置菜单，不属通知。**新增直发点即偏差**，不按固定处数判 |
+| 6 | 分隔线 | `TG_SEP *=\|━━━` | 四处同值 18 条（bash 真源 / pwsh `0x2501*18` / python `'━'*18` / `sync_to_tg.sh` 内嵌） |
 | 7 | 收尾区覆盖 | 分别统计 `tg_add_title` 与 `tg_add_footer\|Get-TgFooter\|tg_footer_line` 的**按文件**计数 | 计数不等时逐个查是否「分支汇聚」或「注释」造成；每处标题分支都必须能走到 footer |
-| 8 | 运行日志接线 | `TG_RUN_URL` 按文件列出 | 16 个 workflow（2026-11-08 实测，含 `openlist-restore-tryrun.yml` 与 `upload-video-to-tg.yml` 的 caption 场景）。注意 caption 场景不属「sendMessage 通知集合」，数字与「有通知 workflow 数」不必相等 |
-| 9 | 树形/折叠调用点 | `tree_lines\|tree_fold\|tree_code_fold` | 逐个确认折叠口径（见第 3 节） |
+| 8 | 运行日志接线 | `grep -l TG_RUN_URL .github/workflows/*.yml` | **现场重数，不记固定数字**。判据是「每个发通知的 step 都有 `TG_RUN_URL`」；直接构造通知的 workflow 数与注入面不必相等（多数经被调脚本/复用 workflow 发送）。caption 场景也需注入 |
+| 9 | 树形/折叠调用点 | `tree_lines\|tree_fold\|tree_code_fold` | 逐个确认折叠口径（见第 2 节判据） |
 | 10 | 分节计数 | `tg_add_section +[a-z_]+ +"[^"]*"` | 后跟列表的带 ` · N`；后跟 `<pre>` 或 kv 行的可不带 |
 | 11 | 速查表函数存在性 | 对 `api-reference.md` 三列表里的每个函数名 `grep -nE '^(函数名)\(\)|^def 函数名|^function 函数名'` 对真源 | 每个名字都能在对应真源找到（速查表只记函数名不记行号——行号会漂，发现表里有真源不存在的函数名即为文档腐化，反过来真源新增公开助手时应补进表） |
+| 12 | **函数体内 `source` 真源** | `source .*tg_notify\.sh`，人工判断是否落在 `name() { … }` 之间 | 只允许在 step 顶层 / heredoc 脚本顶层。函数体在子 shell 里跑时，函数内 `source` 不影响父 shell 函数表，会把调用点对 `send_tg` 的本地覆写还原掉，`local` 也失效（规范 · 通知函数的正确接法） |
+| 13 | 接力轮重复通知 | 长跑 workflow 里按「服务已就绪」判据发通知的调用点 | 用 `/tmp` 标记文件区分首轮/接力轮，接力轮只记日志；否则每个接力 run 重复推同一条（规范 · 通知函数的正确接法） |
+| 14 | `🕒` 误用 | `🕒` | 只允许出现在无 run 上下文的常驻服务收尾区（`health/system_health.sh`、`board.py`、`gateway-watchdog.py`）；正文分节/时间行不得使用 |
 
 ## 2. 四域判据（派 worker 时写进 prompt 的摘要）
 
@@ -27,7 +31,7 @@
   命令/版本号/原始异常串）用 `<code>`，自然语言（原因/结论/状态/备注/有效期）裸文本
 - **同一分节内口径必须一致**：一次查询返回的 IP/ISP/ASN/位置整节同为等宽；
   逐个判断会产出斑马纹，读者会当成版式 bug
-- 条目一律 `├─/└─` 树形（前缀统一包等宽 `<code>`，2026-09-22 起，规范 4.2），元数据 ` · ` 跟在主体后
+- 条目一律 `├─/└─` 树形（前缀统一包等宽 `<code>`，规范 · 清单明细），元数据 ` · ` 跟在主体后
 - 折叠看**清单性质**不只看条数：流水/日志类超 8 条折叠为「还有 N 条…」；
   结构性清单全量展示
 - `tree_code_fold` 收裸文本、`tree_fold` 收已构建条目流，误用会二次转义
@@ -47,23 +51,23 @@
 | 进度面板四组任务列表（待处理/已完成/已跳过/失败 + 进行中）不折叠 | 结构性清单：折掉后半段等于把「哪些任务没跑完」藏起来（`sync_progress.sh` 终态判定段 `_progress_render_task_list` 一带注释即此意） |
 | `task_preview` 同步对、`task_engine` 子目录/批次统计不折叠 | 结构性清单，同 规范 · 折叠规则判据 |
 | `sync_to_tg.sh` 失败清单走 `tree_fold` | 流水类，与同通知「已上传」同口径 |
-| `📍 测速点网络` 分节带 ` · N` | 2026-09-12 起恒带计数（规范 · 分节：后跟条目列表必须带），taier/gitee 单目标即 ` · 1`——共享层 `count_hint` 无条件拼（`speedtest_common.py` build_target_network_section） |
-| taier 通知**没有**「⚠️ 测活探测异常」分节（2026-09-24 起） | 旧分节记「探测机制没跑通」的误伤（逐个探 `/proxies/{name}` 恒 404）；改批量延迟表判活后只有两种世界：拿不到表 ⇒ 探测层整体关闭、不产生判死条目；拿到了 ⇒ 「表里没有」是真判死、计入 `❌ 失败`。若再出现该分节即为回退（规范 · 2.8 测速三套） |
-| taier 的「未更新订阅」按真因分文案（三种） | 真·达标不足 / 有速度但缺可导出配置（实现层丢 `proxy_obj`）/ 到点收摊少测（句尾补「预算内仅测完 N/总数 个」）是三回事，文案必须分开（规范 · taier 专属分节，现见规范 2.8 测速注记与台账 1.6） |
+| `📍 测速点网络` 分节带 ` · N` | 恒带计数（规范 · 分节：后跟条目列表必须带），taier/gitee 单目标即 ` · 1`——共享层 `count_hint` 无条件拼（`speedtest_common.py` build_target_network_section） |
+| taier 通知**没有**「⚠️ 测活探测异常」分节 | 旧分节记「探测机制没跑通」的误伤（逐个探 `/proxies/{name}` 恒 404）；改批量延迟表判活后只有两种世界：拿不到表 ⇒ 探测层整体关闭、不产生判死条目；拿到了 ⇒ 「表里没有」是真判死、计入 `❌ 失败`。若再出现该分节即为回退（台账 1.6） |
+| taier 的「未更新订阅」按真因分文案（三种） | 真·达标不足 / 有速度但缺可导出配置（实现层丢 `proxy_obj`）/ 到点收摊少测（句尾补「预算内仅测完 N/总数 个」）是三回事，文案必须分开（台账 1.6） |
 | 后跟 `<pre>` 或 kv 行的分节不带计数 | 规范 · 分节允许 |
 | emby 规格行 codec（h264）裸文本 | 一行多字段混排，单独套 `<code>` 会成斑马纹 |
-| openclaw 归档告警标题随阶段 + 对象变化 | 「归档告警 · <对象>」/「最终归档告警 · <对象>」：阶段区分轮次，对象区分是哪个归档包（五种归档曾共用一个「OpenClaw 归档告警」，从标题看不出是哪个包出问题） |
+| openclaw 归档告警标题随阶段 + 对象变化 | 「归档告警 · <对象>」/「最终归档告警 · <对象>」：阶段区分轮次，对象区分是哪个归档包 |
 | openclaw「最终归档结果」的 `📦 归档明细` 只调 `tree_lines`、不折叠 | 固定几项的结构性清单（最多 5 个归档对象），折掉任一项都会让读者误判归档是否完整；条目由 `tg_add_entry` 构建（已含 `<code>`），本就该走 `tree_lines`/`tree_fold` 而非 `tree_code_fold` |
 | 媒体 caption 无标题/分隔线/收尾区 | 规范 · 收尾区固有例外，但必须转义 + 显式 parse_mode |
 | 测速节点指标串里的 `35ms` | 指标字段（与 `↑`/`↓` 并排），非独立时长表述，不走「毫秒」层 |
-| emby「取直链」的 `（缓存命中）` / `（冷解析）` | 与既有 `（预估值）`「（走挂载）」同为**冒号前**、紧跟被测量对象的括号说明（不是行尾后缀），说明本次取链是否真花了那段时间；对象已有括号时并入同一括号、以 ` · ` 分隔。属自然语言裸文本，不套 `<code>`；判据见 规范 · 起播等待（域字段口径现维护在台账 3.4，与 `docs/emby.md`「起播等待」一节） |
+| emby「取直链」的 `（缓存命中）` / `（冷解析）` | 与既有 `（预估值）`「（走挂载）」同为**冒号前**、紧跟被测量对象的括号说明（不是行尾后缀），说明本次取链是否真花了那段时间；对象已有括号时并入同一括号、以 ` · ` 分隔。属自然语言裸文本，不套 `<code>`；判据见台账 3.4 与 `docs/emby.md`「起播等待」 |
 | 标题数与 footer 数不等 | 多为分支汇聚（如 `github_backup_all.yml` 4:2）或注释造成的计数差 |
 | openclaw 的 `wb_notify` / `wb_stop_notify` 两处各存一份版式 | `Run workbuddy-gateway` 与 `Stop OpenClaw and Final Archive` 是两个 step、shell 不共享，函数无法跨 step 复用；**改版式必须两处一起改**，这是最容易「改一处漏一处」的地方（域字段口径见台账 3.1 / `openclaw.yml` 两处函数头注释） |
-| `wb_notify` 账号池的子行不是 `tree_lines` 渲染的 | 子行必须用 `tree_sub` 前缀**手拼**：`tree_lines` 把每行当兄弟条目，子行经它会渲染成 `├─/└─` 与条目平级（规范 4.2 二层列表）。条目行用 `tree_conn`，子行紧接其后用 `tree_sub`，末条索引两处一致 |
+| `wb_notify` 账号池的子行不是 `tree_lines` 渲染的 | 子行必须用 `tree_sub` 前缀**手拼**：`tree_lines` 把每行当兄弟条目，子行经它会渲染成 `├─/└─` 与条目平级（规范 · 清单明细二层列表）。条目行用 `tree_conn`，子行紧接其后用 `tree_sub`，末条索引两处一致 |
 | 收尾停止通知只有结论行、没有账号池 | 收尾 step 里没有 `WB_CREDS` / `WB_POOL`（启动 step 的局部变量），且网关已停——列账号池会让人以为服务还在跑。**不是漏字段** |
 | `tg_append _msg $'\n'` 出现在账号池块之后 | 块尾补空行：`tg_add_block` 不补尾空行，否则下一个 kv（数据目录）会紧贴末条子行，与规范示例的「块与 kv 区之间空一行」不一致 |
-| trae2api 通知（`openclaw.yml` 单份内联；按需签到 workflow `trae2api-notify.yml` 已于 2026-09-22 移除）无「凭据」分节（2026-10-05 随 wb_notify 一并移除）、「🧾 原始输出」非空才渲染 | 与 workbuddy 版式同源但数据来源不同：版本写 Release tag（2026-10-05 起取 fork Release 静态二进制部署）；「原始输出」照 wb_notify 的 $6 口径非空才渲染，部署失败给脚本 stderr、启动失败给容器日志尾部、签到分支给签到工具 stderr 尾部（1200 字节） |
-| workbuddy 账号池用 `jq` 解析 `workbuddy-status.json` | **不是**「解析未文档化文件」：键名由上游 Go 结构体 `accountSnapshot` 的 json tag 固定，比 `status` 子命令的对齐文本表格可靠（后者字段名后跟多个空格、`过期时间` 独立成行，解析脆且易漏）。域字段口径见台账 3.1（数据源与字段表） |
+| trae2api 通知（`openclaw.yml` 单份内联；按需签到 workflow 已移除）无「凭据」分节、「🧾 原始输出」非空才渲染 | 与 workbuddy 版式同源但数据来源不同：版本写 Release tag（取 fork Release 静态二进制部署）；「原始输出」照 wb_notify 的 $6 口径非空才渲染，部署失败给脚本 stderr、启动失败给容器日志尾部、签到分支给签到工具 stderr 尾部（1200 字节） |
+| workbuddy 账号池用 `jq` 解析 `workbuddy-status.json` | **不是**「解析未文档化文件」：键名由上游 Go 结构体 `accountSnapshot` 的 json tag 固定，比 `status` 子命令的对齐文本表格可靠（后者字段名后跟多个空格、`过期时间` 独立成行，解析脆且易漏）。域字段口径见台账 3.1 |
 | `quotaKnown` 为 false 时显示「额度未获取」而不是 0 | 快照里 `quotaRemaining` 此时是无意义的 0（还没查到），显示 0 会与「付费耗尽」混淆。照上游 `monitor` 显示 `-` 的同一判断 |
 | workbuddy 通知里的 `exp` / `awk` 解析残留 | 已全面改用 jq；若再看到 awk 解析 `status` 文本输出即为回退。**另：awk 里 `exp` 是内置函数（指数），不能当变量名**（历史踩坑） |
 | workbuddy 免费模型列**具体模型名**而非只给计数 | `freeModels` 只是个数字，只写「免费模型 1」读者不知道是哪个。名字取自上游模型目录接口（见下条），按「生效倍率为 0 且促销未过期」筛出 |
@@ -72,92 +76,16 @@
 | 免费名单取到但为空 vs 取不到，写法不同 | 取到但 0 个免费 → 如实写「免费模型 0」；**取不到**（超时/非 200/JSON 无 `models`）→ 整段降级退回首轮的计数口径，**绝不编造模型名**，也绝不把「取不到」当「没有免费」。这是降级不是漏字段 |
 | 冷却写**「什么时候恢复」**而非只给数量，且账号级/模型级**两层都给** | 上游 `markCooldown`（屏蔽整账号）与 `markModelCooldown`（只屏蔽单模型）是两套独立冷却、恢复时刻不同，只给「模型冷却 2」读者没法判断该等还是该换账号。账号级取 `cooldownUntil` → `冷却 YYYY-MM-DD HH:MM`（**只在 `state=cooldown` 时展示**，`cooldownUntil` 是 `omitempty`，其他状态下残留也不展示，否则与「可用」自相矛盾）；模型级取 `modelStates[].cooldownUntil` 的 **min**（`模型冷却 N · 最早 HH:MM 恢复`）。**一律绝对时刻、不折算「还剩多久」** —— 通知是快照，读者几分钟后看到时相对时长已不准 |
 | 模型冷却的「最早恢复」只在拿得到时刻时才写 | `modelStates` 可能缺失或该模型无 `cooldownUntil`（`omitempty`），此时**只给数量、不写半截**（如只写「模型冷却 2」，不写「最早 - 恢复」）。`cooldownMsg`（上游 429 原文，可能上百字符）**不进通知**，会撑爆子行且读者要的是时刻不是原文 |
-| workbuddy TSV 的**每一列都不许为空**（空值填哨兵 `-`） | `read` 会把连续制表符折叠成一个（制表符属 IFS 空白），中段任一列为空，其后的值就整体左移、错位嫁接到前一个变量上。**只把第 1 列放非空是不够的**（那挡不住中段错位）：第 7 列（免费模型名）与第 8 列（模型冷却）都可能为空且相邻，实测会把冷却数当模型名渲染成 `免费模型 1 · <code>2</code>` —— 等于**编造模型名**。故 `jq` 侧一律填 `-`，渲染侧读进来先还原成空串再走「非空才并入」。第 1 列的判定标记仍放最前，但只是冗余保护（此坑已实测复现，且负向验证确认此修复承重） |
-| 规范样例区的树形前缀是裸 `├─ `，实现渲染成 `<code>  ├─ </code>` | 样例是抽象版式，只示意层级与正文位置；前缀统一包等宽 `<code>` 是 2026-09-22 起的规范 4.2 规则（比例字体下盒线字符不成列）。核对以规则与真源渲染为准，别拿样例判偏差，更别照样例写断言（render_preview 6 条断言曾因此假红） |
+| workbuddy TSV 的**每一列都不许为空**（空值填哨兵 `-`） | `read` 会把连续制表符折叠成一个（制表符属 IFS 空白），中段任一列为空，其后的值就整体左移、错位嫁接到前一个变量上。**只把第 1 列放非空是不够的**（那挡不住中段错位）：第 7 列（免费模型名）与第 8 列（模型冷却）都可能为空且相邻，实测会把冷却数当模型名渲染成 `免费模型 1 · <code>2</code>` —— 等于**编造模型名**。故 `jq` 侧一律填 `-`，渲染侧读进来先还原成空串再走「非空才并入」。第 1 列的判定标记仍放最前，但只是冗余保护 |
+| 规范样例区的树形前缀是裸 `├─ `，实现渲染成 `<code>  ├─ </code>` | 样例是抽象版式，只示意层级与正文位置；前缀统一包等宽 `<code>` 是规范 · 清单明细的规则（比例字体下盒线字符不成列）。核对以规则与真源渲染为准，别拿样例判偏差，更别照样例写断言（render_preview 曾因此假红） |
 
-## 3.1 通知函数的接法（Grep 扫描项，纳入第 1 步）
+## 3.1 已知历史形态（冒烟/核对必须能抓，不是规范）
 
-| # | 扫描项 | 模式 | 期望结果 |
-|---|---|---|---|
-| 12 | **函数体内 `source` 真源** | `source .*tg_notify\.sh`，人工判断是否落在 `name() { … }` 之间 | 只允许在 step 顶层 / heredoc 脚本顶层。函数体在子 shell 里跑时，函数内 `source` 不影响父 shell 函数表，会把调用点对 `send_tg` 的本地覆写还原掉，`local` 也失效（规范 4.9） |
-| 13 | 接力轮重复通知 | 长跑 workflow 里按「服务已就绪」判据发通知的调用点 | 用 `/tmp` 标记文件区分首轮/接力轮，接力轮只记日志；否则每个接力 run 重复推同一条（规范 4.9） |
-
-## 3.2 2026-10-05 第六轮核对结论（全库四域）
-
-> 本节及 3.3 的规范章节号（2.x/4.4 等）是**当时**的章节号，保留作历史记录不回改；
-> 现行规范章节以 `docs/telegram-notify.md` 当前目录为准（2026-11-08 规范重排：
-> 原第 2 章通知清单移至台账 `telegram-notify-registry.md`，原第二个 4.4 改 4.9）。
-
-- **方法**：四域并行通读（openlist / workflows 内联 / tg-channel / 测速+pwsh）→ 逐条
-  回代码复核 → render_preview 16 项全绿 → 修复后回归。本轮共确认 39 条不一致并已全部
-  处理（文档侧改 规范+本文件，实现侧 8 处见下）。
-- **硬约束全绿**：TG_RUN_URL 全覆盖（当时 15 个，2026-11-08 实测 16 个；同日
-  7 个 `self_retrigger` 调用方与测速三套又补齐注入，下轮核对按新集合重数）且无
-  `TG_RUN_STARTED_AT` 残留注入；
-  alert 档调用点凭据注入齐全；`<b>/<i>/•` 零使用；curl 直发 6 处 = 3 类合规例外。
-- **实现侧已修**：
-  - `openclaw.yml` send_telegram_alert / send_final_archive_warning 的真源 source
-    提到 step 顶层（后者以 `&` 后台执行，原写法正中规范 4.9（当时编号 4.4）子 shell 陷阱）；
-  - 备份两 workflow 通知大小 numfmt → 真源 `format_bytes`（打包段 numfmt 只进日志，保留）；
-  - `emby.yml` 删自造 `fmt_size`（5.5 GB），规格行走 `format_bytes`；
-  - trae 签到健康条目 `tg_add_entry` → `tg_add_entry_text`（主体是自然语言）；
-  - `sync_progress.sh` 两处整行 `<code>` 包 tree_lines 输出 → 缩进段与树行**并列**
-    两个 `<code>`（嵌套同名标签会 HTML 400 面板丢失）；L2b/L7d-3 断言同步改并列形态；
-  - `file_split.sh` 三处通知点 `format_bytes_iec` → `format_bytes`（iec 只留给
-    log_fix 日志行）；安全检查摘要 `bytes` 统一「字节」；
-  - `add_uploaded_video.py` 台账 human_size 对齐 IEC（只进台账不进通知）。
-- **规范侧已修**：workbuddy「鉴权→API Key」「凭据分节移除」、trae2api 四条口径、
-  最终归档/归档告警标题、task_engine 触发点、「四态→四类分支五种标题」、2.1/2.2/2.7
-  示例补组与 IEC 化、2.5 补每日签到渲染形态与模型倍率独立通知、2.6 补 🟡/🟠 中间态
-  与 qingyan-proxy 行、5.2 python 侧如实描述、6.2 档位清单移除「⛔ 同步中断」
-  （面板恒主 bot 不参与路由）、TSV 列号 6/7 → 7/8。
-- **仍合规、无需再查**（下轮可直接跳过）：openlist 域树形/折叠调用点分工、
-  `sync_to_tg.sh` 失败清单 tree_fold、五组任务列表不折叠、`task_preview` 结构性
-  清单、三套测速「到点收摊」位置与文案、taier 无「测活探测异常」分节、
-  caption 三行形态与转义。
-
-## 3.3 2026-10-19 第七轮核对结论（通知文档 vs 实现，全库标题字面量穷举）
-
-方法：以 `docs/telegram-notify.md` 为基准，抽取全库所有 `tg_add_title` /
-`Send-TgMessage` / python f-string / `wb_notify`·`trae_notify` 调用点标题 +
-逐文件核 31 个 workflow 与 `.github/scripts/` 五域，共确认 **16 处不一致**，
-分三类全部处理（文档侧 11 条、实现侧 5 条）。
-
-- **A 类 · 文档写错（引用了不存在的东西）**——5 条
-  - `speedtest_common.should_stop_for_budget` → 实为 `speedtest_common.py`；
-  - 「`check_mihomo_runtime` 仅 gitee 有」→ cdn 也在用（taier 才没有）；
-  - 「`tg_notify.sh` 头部写着 source 幂等可重复」→ 头部无此句，4.4 节论据改写为
-    「bash 允许同名函数重复定义」；
-  - `❌ 处理上传失败` → 实际 `❌ 处理/上传失败`；
-  - 「python 侧格式化统一走共享层」→ 共享层无此函数，实为 `sync_to_tg.sh` 内嵌
-    `human_size`（6.3 表格原写「python 手算」与 5.2 自相矛盾，一并改）。
-- **B 类 · 实现有、文档没收**——6 条，补登记：`❌ OpenClaw 最终归档失败`（三态，
-  原只记 ✅/⚠️）、`🚨 OmniRoute 归档恢复失败 · 空库兜底`（P0 事故通道）、
-  `🚨 vaultwarden 数据恢复失败`（`p.yml` 整条链路未收录）、
-  `🚫 Dropbox 配额不足，本轮已中止`、`🧯 保活接力已熔断`、`❌ trae2api 部署失败`。
-- **C 类 · 口径分歧**——5 条：zcode2api 就绪态在 2.4/2.5 重复登记（收敛为
-  2.5 只记 🟡/🟠 中间态 + 指向 2.4）；`openlist-diag`/`openlist-fix-check` 注入
-  凭据但一次不发（2.10 记死配置）；autoclaw 缺停服通知（实现补齐，四网关闭环）；
-  `🚫`/`🧯` 不进 5.5 图标表（补）；`❌ OpenClaw 最终归档失败` 走普通档而同轮
-  `send_archive_alert` 是 alert 档（实现改为全败 alert）。
-- **secrets 命名统一**：8 处 `secrets.TG_CHAT_ID` → `secrets.TELEGRAM_CHAT_ID`
-  （`openclaw.yml` 1 + `p.yml` 2 + `emby.yml` 5），`docs/emby.md` secrets 表同步。
-  ⚠️ **环境变量键名 `TG_CHAT_ID` 保留不动**（`emby.yml:1077/1673` 把它透传给
-  `/opt/watchdog.sh`，那是 bash 真源 `TG_*` 别名回退的契约，与 secret 名是两件事）。
-- **下轮可直接跳过**：39 个脚本文件/14 个 workflow 存在性（全部核对过，无一缺失）；
-  openlist 域各通知落点（现行清单见台账 1.1）；`TG_RUN_URL` 全库注入面（无
-  `TG_RUN_STARTED_AT` 残留）；`render_preview.sh` 16 项全绿。
-
-## 3.4 2026-11-07 桥接冒烟基线（资产段 · 路线 B）
-
-- `smoke_assets_bridge.sh` 全绿（六源 CLI + board.log + 端到端渲染）。
-- 已知历史形态，冒烟必须能抓：`_assets_block` 曾把「📅 资产」节标题经
-  `tg_section` 追加语义放在数据行**之后**，通知里 kv 行悬进上一节、标题空挂
-  （2026-11-07 复现并修复，负向验证过会变红）。看板侧再动 `_assets_block`
-  结构时，先想它是否破坏「标题在前」契约。
-- `_DAYS_CACHE` 漏定义（2026-11-07）：缓存 decorator 给 `_api_ledger_days`
-  加缓存漏定义缓存字典 → 快照后台重算每轮 NameError、SWR 恒回旧值、
-  `/api/days` 500，通知侧完全无感。board.log 扫描项即为此设。
+- 资产段「📅 资产」节标题曾因 `tg_section` 追加语义被放在数据行**之后**，通知里 kv
+  行悬进上一节、标题空挂。看板侧再动 `_assets_block` 结构时，先想它是否破坏
+  「标题在前」契约。
+- `_DAYS_CACHE` 漏定义曾导致快照后台重算每轮 `NameError`、SWR 恒回旧值、
+  `/api/days` 500，而通知侧完全无感。`board.log` 扫描项即为此设。
 - 空输出（任一源当日无数据、qingyan 回退快照）= 合法，非偏差。
 
 ## 4. 回归基线（改动触及 openlist 域时必跑）
@@ -174,21 +102,13 @@ grep -l "command not found" /tmp/x_*.log   # 必须为空（硬要求）
   - `test_marker_skip_guards.sh` 1b（macOS BSD `date` 无 `-d`）
 - `command not found` 扫描**必须为空**——套件 PASS 不等于通过。
 
-### 2026-11-09 实测后修订（两个历史假红来源已根治）
+### 共享抽取文件与噪声
 
-- **共享 `extracted.sh` 污染已消除**：`test_get_openlist_token_login` /
-  `test_sync_task_status_mapping` / `test_batch_precheck_circuit_breaker` 三套
-  改把抽取文件写进各自 `WORK_DIR`（此前共用 tests/extracted.sh，串行跑时后跑的
-  覆写先跑的，产生过 25 条假 cnf）。上面「跑期间不要并发跑单个测试」的告诫对
-  cnf 维度已不再承重（时序敏感类仍适用）。
-- **`test_batch_precheck_circuit_breaker` 自身的 25 条假 cnf 已修**：c17e757 加
-  409 死目录闸（`_batch_409_deadlock` 定义 task_engine.sh:638）时漏给本测试补
-  stub——sed 只抽 `sync_by_file_batches()`（2155 行起），调用点 rc≠124 分支一走
-  就 cnf。已补 stub（返回 1 = 非 409），cnf 清零，PASS=53。
-- **假红名单更新**：`test_truth.sh`（依赖 docker——本机有 docker 时实际会 PASS，
-  2026-11-09 实测）、`test_marker_skip_guards.sh` 1b（macOS BSD `date` 无 `-d`）
-  仍是环境假红；`test_restore_real_local.sh` 场景 8 六连 FAIL 是 b5ae551 合入时
-  的分隔符 bug（FIXLINE 用 `|` 而 restore_info.jq 只认 0x1F），已修，不再在名单。
+- `tests/extracted.sh` 曾被三套测试共用，串行跑时后跑的覆写先跑的，产生假 cnf。相关
+  套件已改把抽取文件写进各自 `WORK_DIR`；新写测试不要再用共享抽取文件。
+- `test_batch_precheck_circuit_breaker` 的 409 死目录闸（`_batch_409_deadlock`）需要
+  stub，漏补会因 `rc≠124` 分支一走进 cnf。
+- 修完 cnf 后必须 `grep -l "command not found" /tmp/x_*.log` 复验为空。
 
 ### flake 名单（单独复跑确认后再下结论，别急着改代码）
 
@@ -198,4 +118,4 @@ grep -l "command not found" /tmp/x_*.log   # 必须为空（硬要求）
 - `test_batch_precheck_circuit_breaker.sh`：回归期间被并发跑过会出现假的
   `command not found`（共用 `tests/extracted.sh`）
 - `test_pair_parallel.sh`：`wc` 前导空白使 `[: 0\n0: integer expression expected`，
-  场景 3a 误报「仍执行 4 个」，单独复跑 `PASS=11 FAIL=0`（2026-09-17 CI 实测一次）
+  场景 3a 误报「仍执行 4 个」，单独复跑 `PASS=11 FAIL=0`

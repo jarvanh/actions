@@ -136,7 +136,7 @@ jobs:
           if [ "$STATUS" == "success" ]; then
             ARCHIVE_NAME="${SELF_HOSTED_ARCHIVE_NAME:-self-hosted_latest.tar.gz}"
             FILE_SIZE_BYTES="${SELF_HOSTED_ARCHIVE_BYTES:-0}"
-            # 大小走真源 format_bytes（规范 5.2：bash 侧只有一份实现，source 了
+            # 大小走真源 format_bytes（规范 · 大小：bash 侧只有一份实现，source 了
             # 真源的通知点直接用它）——numfmt --to=iec-i 输出 "3.4GiB"（无空格、
             # 非三位小数），与全库 "3.400 GiB" 形态漂移
             FILE_SIZE_HUMAN=$(format_bytes "$FILE_SIZE_BYTES")

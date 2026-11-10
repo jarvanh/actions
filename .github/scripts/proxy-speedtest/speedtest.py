@@ -1235,7 +1235,7 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None,
     # 标题状态随结论降级（规范 · 状态图标语义）：0 可用节点 → ⚠️，不再恒 ✅
     # 来源标签（PROXY_SPEEDTEST_LABEL）：编排层 proxy-speedtest-gistnodes 调用时传
     # 「gist 节点」，标题变成「gist 节点 · CDN 测速完成」。同一套测速会被定时轮和 gist 抓取轮
-    # 分别触发，标题不区分的话读者分不清通知来自哪一轮（规范 · 3.1 允许标题带区分词）。
+    # 分别触发，标题不区分的话读者分不清通知来自哪一轮（规范 · 标题与分隔线允许标题带区分词）。
     # ⚠️ 同 taier：注释与 f-string 都在，赋值行漏了 ⇒ 标题渲染即 NameError、通知静默发不出。
     # 判据与注释、规范（规范 · 3.x CDN 测速：0 可用节点降级 ⚠️）一致。
     _title_emoji = '⚠️' if (not ok_results or aborted_due_to_runtime) else '✅'
@@ -1247,7 +1247,7 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None,
     lines = [
         f'{_title_emoji} {_title_prefix}CDN 测速完成',
         sep,
-        f'🕒 起止：{esc(started)} ~ {esc(ended)} · 耗时 {esc(duration_text)}',
+        f'🗓 起止：{esc(started)} ~ {esc(ended)} · 耗时 {esc(duration_text)}',
         f'📊 节点：共 {len(results)} 个 · 可用 {len(ok_results)} 个',
         # 到点收摊：**不是失败**（退出码仍 0），但必须说清「本轮没测完」，否则读者会
         # 以为拿到的就是全部节点的结论

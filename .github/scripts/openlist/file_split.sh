@@ -26,7 +26,7 @@ send_video_split_notification() {
   local validation_summary="${6:-}"
 
   local file_size_human
-  # 通知走真源 format_bytes（"1.071 GiB"，规范 5.2）；format_bytes_iec（"1.0GiB"）
+  # 通知走真源 format_bytes（"1.071 GiB"，规范 · 大小）；format_bytes_iec（"1.0GiB"）
   # 只保留给 log_fix 日志行 —— 两种口径各有用途，通知里不得出现日志口径
   file_size_human=$(format_bytes "$file_size")
 
@@ -94,7 +94,7 @@ send_binary_split_notification() {
   local result="$4"
   local log_file="$5"
   local file_size_human
-  # 通知走真源 format_bytes（同上，规范 5.2）
+  # 通知走真源 format_bytes（同上，规范 · 大小）
   file_size_human=$(format_bytes "$file_size")
   local message=""
   if [ "$result" = "success" ]; then

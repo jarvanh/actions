@@ -8,7 +8,8 @@
 > 规范层（版式/发送层）不随实现漂移，两者分开后规范不再因加通知而改动。
 > 行号不写进本文件（会漂），定位用文件名 + 函数名 / 标题字面量搜。
 >
-> 更新时机：新增 / 改名 / 删除通知时同步对应行；其余时间不动。
+> 更新时机：新增 / 改名 / 删除通知时同步对应行；档位变化时同时核对 step 是否注入了
+> ALERT 凭据。其余时间不动。
 
 ---
 
@@ -26,8 +27,8 @@ sendDocument 直连 API（固定主 bot，不参与档位路由）。
 | 通知 | 在哪 | 何时发 | 档位 |
 |---|---|---|---|
 | 📋 任务预览 · 任务名 | `task_preview.sh` | 预览阶段，每个任务一条 | 普通 |
-| 🔄 同步进度 / ⏸️ 同步轮次收摊 / ⛔ 同步中断 / ⚠️ 同步完成 / ✅ 同步全部完成 | `sync_progress.sh` | 进度面板原地刷新（删旧 + 发新）+ 五种终态（收摊=预算到站下轮接力；中断=未注册任何任务） | 面板直连 |
-| ⚠️ {task} 部分文件同步失败 / ⚠️ {task} 部分文件已通过其他方式同步 / ⚠️ {task} 同步失败 / ✅ {task} 同步完成 | `sync_notify.sh` | 同步结束，按结果分四类分支（⚠️「部分文件同步失败」与 ⚠️「同步失败」内部再分叉，标题形态共五种） | 普通 |
+| 🔄 同步进度 / ✅ 同步全部完成 / ⚠️ 同步完成 / ⏸️ 同步轮次收摊 / ⛔ 同步中断 | `sync_progress.sh` | 进度面板原地刷新（删旧 + 发新）；终态四种标题、五条判定分支（收摊=预算到站下轮接力；中断=未注册任何任务） | 面板直连 |
+| ✅ {task} 同步完成 / ⚠️ {task} 部分文件同步失败 / ⚠️ {task} 部分文件已通过其他方式同步 / ⚠️ {task} 同步失败 | `sync_notify.sh` | 同步结束，按结果分四类标题、五条分支（「部分文件同步失败」与「同步失败」内部再分叉） | 普通 |
 | 📁 {task} · 错误日志 | `sync_notify.sh` | 同步失败后随 `sendDocument` 附上的日志文件 | 直连 |
 | ⏭️ 同步任务跳过 | `sync_marker.sh` | 落在跳过窗口内 | 普通 |
 | 🚨 源端大小异常减小 | `sync_marker.sh` | 源端比上次记录缩水超阈值 | alert |
@@ -47,13 +48,19 @@ sendDocument 直连 API（固定主 bot，不参与档位路由）。
 
 ### 1.2 Telegram 频道视频管线（`.github/scripts/tg-channel/`）
 
+编排在 `ph-dl.yml`（`CAPTION_PREFIX=ph`）与 `upload-video-to-tg.yml`
+（`CAPTION_PREFIX=91`）。
+
 | 通知 | 在哪 | 何时发 | 档位 |
 |---|---|---|---|
-| 📺 / ⚠️ / ❌ {CAPTION_PREFIX} 同步汇总 | `sync_to_tg.sh` | 一轮频道同步结束（全失败 ❌ / 部分失败 ⚠️ / 否则 📺） | 普通 |
+| 📺 / ⚠️ / ❌ {CAPTION_PREFIX} | `sync_to_tg.sh` | 一轮频道同步结束（全失败 ❌ / 部分失败 ⚠️ / 否则 📺）。标题只有 emoji + 前缀（实际渲染 `📺 ph` / `📺 91`），无「同步汇总」后缀 | 普通 |
 | ❌ 获取远端文件列表失败 / ❌ 下载失败 / ⏭️ 损坏视频已标记跳过 / ❌ 处理/上传失败 | `sync_to_tg.sh` | 单文件级失败即时通知 | 普通 |
-| 🔍 {label} 重复视频检测与去重（按 ID / 按哈希） | `dedupe_ph_videos.sh`、`dedupe_videos_by_hash.sh` | 发现重复组 | 普通 |
-| 🧹 {label} 清理 yt-dlp 残留文件 | `cleanup_ytdlp_residual.sh` | 清理 `-Frag` / `.ytdl` / `.m3u8`（清理数为 0 不发） | 普通 |
+| 🔍 ph-dl 重复视频检测与去重 | `dedupe_ph_videos.sh` | 发现重复组（按 ID） | 普通 |
+| 🔍 {WORKFLOW_LABEL} 重复视频检测与去重 | `dedupe_videos_by_hash.sh` | 发现重复组（按哈希；label 默认 `91-tg`） | 普通 |
+| 🧹 ph-dl 清理 yt-dlp 残留文件 | `cleanup_ytdlp_residual.sh` | 清理 `-Frag` / `.ytdl` / `.m3u8`（清理数为 0 不发） | 普通 |
 | 🧹 {label} 频道清理完成 | `reset_tg_channel.sh` | 清空频道并删 uploaded/failed 记录 | 普通 |
+
+> 「按 ID / 按哈希」是正文 `重复 ID` / `重复哈希` 的区分，不进标题。
 
 ### 1.3 备份与任务结果（workflows 内联）
 
@@ -72,7 +79,7 @@ sendDocument 直连 API（固定主 bot，不参与档位路由）。
 | 🟢 OpenClaw Runner 已就绪 | `openclaw.yml` | Tailscale SSH 就绪，推 SSH / RustDesk / 出口网络 / 出口节点 / AI 网关 | alert |
 | ⚠️ Tailscale SSH 入口设置失败 | `openclaw.yml` | SSH 入口建立失败（可动手项） | alert |
 | 🟢 workbuddy-gateway 已就绪 / ⚠️ 已启动 · 无可用账号 | `run-workbuddy.sh` | 本地代理网关（8318）启动自检后（账号池为空时降级 ⚠️）。字段口径见 3.1 节 | alert |
-| 🟢 zcode2api 已就绪 | `run-zcode2api.sh` | 本地 GLM 网关（8319）启动自检后；降级态见下表 | alert |
+| 🟢 zcode2api 已就绪 | `run-zcode2api.sh` | 本地 GLM 网关（8319）启动自检后；降级态见 1.5 节 | alert |
 | 🟢 qingyan-proxy 已就绪 / ⏭️ 已跳过 / ❌ 启动失败 | `run-qingyan.sh` | 清言反代（8320）端到端自检后；条件不满足跳过 / 60 秒未监听失败 | 就绪/失败 alert；跳过普通 |
 | 🟢 autoclaw-proxy 已就绪 / ❌ 启动失败 | `run-autoclaw.sh` | AutoClaw 积分反代（8322）端到端自检后；凭据缺失跳过不起假服务 | alert |
 | 🟢 / ⚠️ trae2api 已就绪 / ❌ 部署失败 · 启动失败 | `run-trae2api.sh` | TRAE SOLO 反代（7864）健康检查通过、批量签到后（签到工具失败降级 ⚠️）。字段口径见 3.2 节 | alert |
@@ -98,19 +105,23 @@ Telegram 收到，放弃重试只会让凭据彻底丢失。
 | ⚠️ AI 网关已降级 · {backend} | `run-ai-gateway.sh` | 自动降级（附回退原因） | alert |
 | ❌ AI 网关全部未就绪 / ❌ OmniRoute（pinned）未就绪 / ❌ CliRelay（pinned）未就绪 / ❌ CLIProxyAPI（pinned）未就绪 | `run-ai-gateway.sh` | pinned 失败或三后端全败 | alert |
 | 🚨 OmniRoute 归档恢复失败 · 空库兜底 | `run-ai-gateway.sh` | Dropbox 归档存在但本轮恢复未走通、已 bootstrap 空库（P0 数据事故信号） | alert |
-| 📊 workbuddy-gateway 模型倍率 · 模型数量N | `run-workbuddy.sh` | 独立第二条通知（非就绪通知分节），自带标题 + `<pre>` 倍率表；发送失败只 `::warning::` 留痕 | alert |
+| 📊 workbuddy-gateway 模型倍率 · 模型数量 N | `run-workbuddy.sh` | 独立第二条通知（非就绪通知分节），自带标题 + `<pre>` 倍率表；发送失败只 `::warning::` 留痕 | alert |
+| AI 网关用量报告 | `openclaw.yml`（`board.py usage-report` 生成正文） | 用量报告 step，标题与内容由看板真源给出（仓库内无标题字面量）。口径见 3.6 节 | 普通 |
 | ⚠️ ZCode 数据提前恢复失败 / ⚠️ 辅助 CLI 安装失败 | `openclaw.yml` | zcode.tar.gz 下载/校验失败或 rclone 不可用（提前恢复步）；gemini-cli/clawhub npm 安装失败 | alert |
 | 🚨 vaultwarden 数据恢复失败 | `p.yml` | Dropbox 备份缺 `db.sqlite3`：本轮终止、不启动空库、不回传（防空库覆盖远端好数据） | alert |
+| 🚨 Dropbox 挂载失败 | `openclaw.yml`（Mount Dropbox） | 挂载失败先发告警（附日志尾部 1200 字节）再 `exit 1`，不带病跑整轮 | alert |
 | 🚨 OpenClaw 自愈失败 | `openclaw.yml` | 主步骤失败，推失败阶段 / 版本 / 关键日志 | alert |
 | ⚠️ 归档告警 · {对象} / ⚠️ 最终归档告警 · {对象} | `openclaw.yml` | 周期/最终归档失败（rclone/tar；标题带对象）。两个告警函数分处不同 step、定义无法共享，**改版式时两处一起改** | alert |
-| ✅ / ⚠️ / ❌ OpenClaw 最终归档完成 · 部分失败 · 失败 | `openclaw.yml` | 最终归档收尾，按对象汇总（全败 ❌；有失败 ⚠️「完成 · 部分失败」；没产出明细时 ⚠️「最终归档未完成」兜底） | 全败 alert；✅/⚠️ 普通 |
+| ✅ / ⚠️ / ❌ OpenClaw 最终归档完成 · 部分失败 · 失败 | `openclaw.yml` | 最终归档收尾，按对象汇总（全败 ❌；有失败 ⚠️「完成 · 部分失败」） | 全败 alert；✅/⚠️「完成」普通 |
+| ⚠️ OpenClaw 最终归档未完成 | `openclaw.yml` | 没产出明细时的兜底（与上一条同 step） | alert |
 | 🚫 Dropbox 配额不足，本轮已中止 | `openclaw.yml` | 归档前置预检：剩余空间低于阈值即中止本轮，不空转刷失败告警 | alert |
 | ℹ️ OpenClaw 约 N 分钟后进入收尾 / ⛔ OpenClaw 约 N 分钟后停机 | `openclaw.yml` | keepalive 剩余约 15 分钟时的收尾预警与停机通知（配对） | 收尾普通；停机 alert |
-| 🧯 保活接力已熔断 | `lib/self_retrigger.sh` | 连续 N 轮 failure 达阈值后停止自动接力。2026-11-08 起全部 7 个调用方（p / ql / sub-store / jellyfin / teslamate / HomeAssistant / tailscale-windows）的接力步均注入了 TG 凭据（含 `_ALERT`） | alert |
+| 🔄 新 run 已启动 | `openclaw.yml` | 接力启动成功、解析到新 run id 后推送新旧 run 链接 | 普通 |
+| 🧯 保活接力已熔断 | `lib/self_retrigger.sh` | 连续 N 轮 failure 达阈值后停止自动接力。全部 9 个调用方的接力步都注入了 TG 凭据（含 `_ALERT`），见 1.9 节 | alert |
 | ❌ workbuddy-gateway 启动失败 | `run-workbuddy.sh` | serve 启动即退或超时未监听 8318 | alert |
-| ⛔ / ⚠️ workbuddy-gateway · zcode2api · qingyan-proxy · autoclaw-proxy 已停止 | 各 `run-*.sh` / `openclaw.yml` | 收尾停服（仍有进程残留时降级 ⚠️），与下一轮「已就绪」配对确认生命周期闭环 | alert |
+| ⛔ {服务} 已停止 / ⚠️ {服务} 已停止 · 进程残留 | 各 `run-*.sh` / `openclaw.yml` | 收尾停服（仍有进程残留时降级 ⚠️ 并加「进程残留」后缀），与下一轮「已就绪」配对确认生命周期闭环 | alert |
 | ⚠️ Emby 直链已回退 | `emby.yml` | 探活连续失败切直连 | alert |
-| ⚠️ Emby 服务启动 | `emby.yml` | 服务与隧道就绪自检（取链自检未过降级 ⚠️） | alert |
+| 📺 / ⚠️ Emby 服务启动 | `emby.yml` | 服务与隧道就绪自检（取链自检未过降级 ⚠️） | alert |
 | ✅ / ❌ / ⛔ / ⚠️ Emby 服务停止 | `emby.yml` | 收尾，按 `job.status`（未知状态兜底 ⚠️） | alert |
 | 🎬 {片名}（播放通知） | `emby.yml` | 每次播放事件（短时间内去重） | 普通 |
 
@@ -124,7 +135,7 @@ Telegram 收到，放弃重试只会让凭据彻底丢失。
 | ✅ / ⚠️ {label ·} CDN 测速完成 | `speedtest.py` | 主报告（0 可用节点 / 到点收摊 / bypass 全命中降级） |
 | ✅ / ⚠️ {label ·} Gitee 测速完成 | `speedtest_gitee.py` | 主报告（运行中中止 / 0 可用（按下载口径）/ 到点收摊降级） |
 | ✅ / ⚠️ {label ·} 泰尔三网测速 | `taier_speedtest.py` | 主报告（0 成功 / 疑似未走代理 / 到点收摊降级） |
-| ❌ …测速异常退出 · {原因} / ⛔ …测速异常终止 | 三套各自 | 可控退出、未捕获异常、信号终止兜底（taier 发送前先撤 TUN）；**alert 档**（notify_best_effort / 未捕获 handler 显式传 'alert'） | alert |
+| ❌ …测速异常退出 · {原因} / ⛔ …测速异常终止 | 三套各自 | 可控退出、未捕获异常、信号终止兜底（taier 发送前先撤 TUN）；**alert 档**（notify_best_effort / 未捕获 handler 显式传 'alert'） |
 
 - `PROXY_SPEEDTEST_LABEL` 只拼**主报告**标题（`✅ gist 节点 · 泰尔三网测速`）；
   ❌ 异常退出 / ⛔ 异常终止兜底标题**不带** label（形态见规范 · 失败与异常）。
@@ -146,30 +157,40 @@ Telegram 收到，放弃重试只会让凭据彻底丢失。
 ### 1.8 本机常驻服务告警（看板 / 哨兵）
 
 由本机常驻进程发出（看板主循环 `board.py`、systemd timer 哨兵
-`gateway-watchdog.py`），**没有 GitHub run 上下文**，收尾区用 `🕒` 报告时刻
-（规范 · 收尾区「常驻服务例外」）。
+`gateway-watchdog.py`、健康看门狗 `health/system_health.sh`），**没有 GitHub run
+上下文**，收尾区用 `🕒` 报告时刻（规范 · 收尾区「常驻服务例外」）。
+
+这两个进程**不在本仓库**，实际位于宿主机 `/dropbox/self-hosted/quota-board/`；
+仓库内只有对它们的调用/引用（如 `services.sh`、`run-*.sh`），通知内容无法在本仓库
+核对。
 
 | 通知 | 在哪 | 何时发 | 档位 |
 |---|---|---|---|
-| 🚨 网关服务异常 / ✅ 网关服务恢复 | `quota-board/gateway-watchdog.py` | systemd 单元 / 容器 / 公网链路连续 2 轮异常；恢复边沿发 ✅ | alert |
-| ⚠️ {数据源} 数据源失联 | `quota-board/board.py` `eval_alerts` | 连续 3 轮采集失败（恢复静默销账） | alert |
+| 🚨 网关服务异常 / ✅ 网关服务恢复 | `gateway-watchdog.py` | systemd 单元 / 容器 / 公网链路连续 2 轮异常；恢复边沿发 ✅ | alert |
+| ⚠️ {数据源} 数据源失联 | `board.py` `eval_alerts` | 连续 3 轮采集失败（恢复静默销账） | alert |
 | 🚨 workbuddy 网关疑似失能 / ✅ workbuddy 网关数据已恢复 | 同上 | 状态快照停更超阈值；恢复边沿发 ✅ | alert |
+| 🚨 系统级故障 / ✅ 系统健康恢复 | `health/system_health.sh`（systemd user timer，每 5 分钟） | 挂载 / 隧道 / 看板 / gateway 状态变化时发；异常持续每 6 小时补提醒；恢复边沿发 ✅。启动后 40 分钟内豁免看板/gateway | 故障 alert；恢复普通 |
 
 ### 1.9 不发通知的 workflow
 
-- **零通知**：`cfip-pool.yml`、`delete-workflow-runs.yml`、`eshop.yml`、
-  `openlist-debug.yml`、`openlist-marker-cleanup.yml`、`proxy-speedtest-gistnodes.yml`
-  （设计使然，文件头有声明）、`socks-exit-pool.yml`、`subs-check.yml`、`tests.yml`。
-  要补的话照 1.3 备份类的形态（规范 · 结果通知），并把 `TG_RUN_*` 接上。
+- **完全零通知**：`cfip-pool.yml`、`delete-workflow-runs.yml`、`eshop.yml`、
+  `openlist-debug.yml`、`openlist-marker-cleanup.yml`、`socks-exit-pool.yml`、
+  `subs-check.yml`、`tests.yml`。要补的话照 1.3 备份类的形态（规范 · 结果通知），
+  并把 `TG_RUN_URL` 接上。
+- **自身不发、但 run 级会发**：`proxy-speedtest-gistnodes.yml`。文件头已声明「通知
+  全部由被复用的那套完成」；它经 `workflow_call` + `secrets: inherit` 调三套测速，
+  由被调 workflow 发主报告（普通）与异常兜底（alert）。统计「有通知的 run」时要算上。
 - **已知死配置**：`openlist-diag.yml` 与 `openlist-fix-check.yml` 在 job 级注入
   `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`，但两个 workflow 及其调用的
-  `diag_*.sh` / `fix_check.sh` 一次都没有发送。2026-10-19 核对确认，暂无发送需求，
-  保留注入不做改动（删掉会让将来想接通知的人找不到接在哪），但这两份凭据不产生
-  任何通知，别把它们算进「哪些 workflow 在发通知」的清单。
-- **收尾步调 `self_retrigger.sh` 的保活型 workflow**（`HomeAssistant.yml`、
-  `jellyfin.yml`、`ql.yml`、`sub-store.yml`、`teslamate.yml`、`tailscale-windows.yml`、
-  `p.yml`）自身不发业务通知，但 2026-11-08 起接力步全部注入了 TG 凭据——🧯 熔断告警
-  在任何调用方都能真实发出（此前仅 p.yml 有凭据，其余 6 个只留日志）。
+  `diag_*.sh` / `fix_check.sh` 一次都没有发送。当前无发送需求，保留注入不做改动
+  （删掉会让将来想接通知的人找不到接在哪），但这两份凭据不产生任何通知，别把它们
+  算进「哪些 workflow 在发通知」的清单。
+- **保活型 workflow 的接力步**（`HomeAssistant.yml`、`jellyfin.yml`、`ql.yml`、
+  `sub-store.yml`、`teslamate.yml`、`tailscale-windows.yml`、`p.yml`、`emby.yml`、
+  `openlist.yml`）都 `source self_retrigger.sh`，因此 🧯 熔断告警在任何调用方都能
+  真实发出。其中 `HomeAssistant` / `jellyfin` / `ql` / `sub-store` / `teslamate`
+  自身不发业务通知；`p.yml`、`tailscale-windows.yml`、`emby.yml`、`openlist.yml`
+  另有自己的业务通知（见 1.3–1.5），别把它们并进「纯保活」清单。
 - scripts 侧无通知的目录：`socks-exit/`、`cfip/`、`rclone/`、`tailscale/`、
   `tunnels/`、`services/`（✅/❌ 全是 CI/journal 日志行）。
 
@@ -260,10 +281,10 @@ AI 网关走 20128 OmniRoute，别把「上游默认」和「本仓库实际绑�
 
 版式同 workbuddy-gateway（第三个 AI 网关的对齐实现），差异在数据来源：
 
-- **`🩺 签到健康 · N 个账号有备注`**（N 是账号数不是失败数）：条目主体
-  「昵称 · 健康备注」自然语言 → `tg_add_entry_text` 裸文本；全健康整段跳过。
-  备注含：上次成功日期、⚠️ 连续失败 N 次、签到设备换代 +1（自愈动过手的证据，
-  不加 ⚠️）、⏳ 退避重试中（已退 N 次）。
+- **`🩺 签到健康 · N`**（N 是账号数不是失败数）：分节计数后另起说明段点明「N 个
+  账号有备注」；条目主体「昵称 · 健康备注」自然语言 → `tg_add_entry_text` 裸文本；
+  全健康整段跳过。备注含：上次成功日期、⚠️ 连续失败 N 次、签到设备换代 +1
+  （自愈动过手的证据，不加 ⚠️）、⏳ 退避重试中（已退 N 次）。
 - 标题：`🟢 trae2api 已就绪` / `⚠️ trae2api 已就绪 · 签到无输出` /
   `❌ trae2api 部署失败`（Release 解析失败 / SHA256SUMS 缺失）/ `❌ trae2api 启动失败`
   （容器健康检查 120 秒未过）。结论以「已就绪」打头、只列非零签到计数
@@ -273,8 +294,8 @@ AI 网关走 20128 OmniRoute，别把「上游默认」和「本仓库实际绑�
 - 「💳 账号池」来自批量签到输出：条目 `uid · 昵称 · 状态`，子行给未用完积分包里
   最早过期的 3 个（`剩 N 分 · 时刻 过期`）。
 - 「🧾 原始输出」非空才渲染：启动失败给容器日志尾部；签到分支给签到工具 stderr
-  尾部（均 1200 字节）。正文另有「📊 模型倍率 · 模型数量N」分节（数据源
-  `/v1/models` 的 consumption_rate）——与 workbuddy 的独立第二条通知同名不同体。
+  尾部（均 1200 字节）。正文另有「📊 模型倍率 · N」分节（数据源 `/v1/models` 的
+  consumption_rate）——与 workbuddy 的独立第二条通知同名不同体。
 - 「用量 + 流水」段（wb_notify 同款）：调 quota-board 的
   `board.py usage-ledger <gateway> 12` CLI，与看板共用渲染与数据源，输出为空静默跳过。
 
@@ -320,9 +341,9 @@ credential_sync.py 每轮对齐凭据，收尾归档回传快照，凭据闭环�
 qoder2api,autoclaw}.sh`）：签到汇总 + 时间维度（wb 额度刷新 / zcode 套餐到期 /
 trae 即将过期 / autoclaw 今日领取）。数据源 = `board.py assets <src>` CLI——口径
 真源在看板，通知只引用，零漂移。`run-qingyan.sh` 走同一 CLI 的 TSV 分支（净额），
-不自带分节。看板改口径后跑规范 8.3 的桥接冒烟。
+不自带分节。看板改口径后跑规范 · 资产段桥接冒烟。
 
 ### 3.6 AI 网关用量报告
 
 `openclaw.yml` step `Notify AI gateway usage report`（普通档）：标题与内容来自
-board.py，普通档发送。
+`board.py usage-report`，仓库内无标题字面量。普通档发送。

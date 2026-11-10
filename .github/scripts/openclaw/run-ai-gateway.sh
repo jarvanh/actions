@@ -25,14 +25,10 @@ _ai_tg_avail() { [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}
 source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh" 2>/dev/null || true
 _ai_notify() {
   _ai_tg_avail || return 0
-  if [ -f "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh" ]; then
-    ( source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh" 2>/dev/null \
-      && tg_add_footer _ai_m \
-      && send_tg "$_ai_m" alert ) \
-      || echo "::warning::OmniRoute TG 通知发送失败（不影响任务）"
-  else
-    echo "::warning::tg_notify.sh 不存在，OmniRoute TG 通知跳过"
-  fi
+  # 真源已在顶层 source 一次；函数体内不再 source（子 shell 陷阱见规范 ·
+  # 通知函数的正确接法）——子 shell 里 source 会还原调用点对 send_tg 的覆写。
+  ( tg_add_footer _ai_m && send_tg "$_ai_m" alert ) \
+    || echo "::warning::OmniRoute TG 通知发送失败（不影响任务）"
 }
 
 # ── 2026-10-30 P5b：上游并行拉起汇合门（屏障）──

@@ -18,7 +18,7 @@
   set +e
   (
     set -uo pipefail
-    # 通知真源在 step 顶层 source 一次（勿挪进函数体，理由见 workbuddy 步骤同名注释 / 规范 4.4）
+    # 通知真源在 step 顶层 source 一次（勿挪进函数体，理由见 workbuddy 步骤同名注释 / 规范 · 通知函数的正确接法）
     source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
     DEPLOY="${GITHUB_WORKSPACE}/.github/scripts/services/qingyan_deploy.sh"

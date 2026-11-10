@@ -292,17 +292,20 @@ jobs:
             sudo dmesg 2>/dev/null | grep -i apparmor | tail -5 || true
             journalctl --user -u rclone-dropbox -n 20 --no-pager 2>/dev/null || true
             # 系统级故障必须主动告知（2026-11-10 1033 事故教训：挂了 3 小时无人知）
-            if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}" ]; then
+            if [ -n "${TELEGRAM_BOT_TOKEN_ALERT:-}" ]; then
               source "$GITHUB_WORKSPACE/.github/scripts/telegram/tg_notify.sh"
-              # 版式按 docs/telegram-notify.md 4.7 告警形态：
+              # 版式按规范 · 告警通知：
               # 对象机器值（<code>）+ 结论裸文本 + <pre> 原始输出 + 收尾区
               msg=""
               tg_add_title msg "🚨 Dropbox 挂载失败"
               tg_add_path msg "主机" "$(hostname)"
-              tg_add_path msg "Run ID" "$GITHUB_RUN_ID"
+              tg_add_path msg "Run ID" "${GITHUB_RUN_ID:-未知}"
               tg_add_kv msg "结论" "挂载点未就绪，本轮无法恢复持久化状态"
-              tg_add_section msg "🧾 原始输出"
-              tg_add_block msg "<pre>$(escape_html "$(tail -8 /opt/logs/rclone-dropbox.log 2>/dev/null)")</pre>"
+              _mount_tail="$(tg_tail_file_safe /opt/logs/rclone-dropbox.log 1200)"
+              if [ -n "$_mount_tail" ]; then
+                tg_add_section msg "🧾 原始输出"
+                tg_add_pre msg "$_mount_tail"
+              fi
               tg_add_footer msg
               send_tg "$msg" alert || true
             fi
@@ -1198,12 +1201,9 @@ jobs:
           # 配额不足：alert 档告警后失败退出（后续步骤按闸门跳过，不再空转）
           _m=""
           tg_add_title _m "🚫 Dropbox 配额不足，本轮已中止"
-          tg_add_kv _m "结论" "剩余 $(escape_html "$(format_bytes "$FREE_BYTES")")，低于阈值 $(escape_html "$(format_bytes "$((MIN_FREE_KB * 1024))")")"
-          tg_add_kv _m "影响" "所有归档/回推都将失败（path/insufficient_space），本轮提前结束"
-          tg_add_section _m "🧹 清理建议"
-          _qrows=""
-          _qrows+="$(tree_sub 1)检查其他大文件或升级套餐"
-          tg_add_block _m "$_qrows"
+          tg_add_kv _m "结论" "剩余 $(format_bytes "$FREE_BYTES")，低于阈值 $(format_bytes "$((MIN_FREE_KB * 1024))")"
+          tg_add_kv _m "影响" "所有归档/回推都将失败（存储端空间不足），本轮提前结束"
+          tg_add_kv _m "建议" "检查其他大文件或升级套餐"
           tg_add_footer _m
           send_tg "$_m" alert || echo "::warning::[dropbox-quota] TG 告警发送失败"
           exit 1
@@ -2050,7 +2050,8 @@ jobs:
             tg_add_kv msg "步骤" "运行 OpenClaw"
             tg_add_path msg "Run ID" "${{ github.run_id }}"
             if [ "$restore_source" = "revision" ]; then
-              tg_add_kv msg "恢复来源" "历史 revision ${restore_rev:-未知} · 创建于 ${restore_time_display:-未知}"
+              tg_add_path msg "恢复来源" "历史 revision ${restore_rev:-未知}"
+              tg_add_path msg "创建时间" "${restore_time_display:-未知}"
             fi
             [ -n "$fail_stage_label" ] && tg_add_kv msg "失败阶段" "$fail_stage_label"
             [ -n "$current_version" ] && tg_add_path msg "当前版本" "$current_version"
@@ -2153,7 +2154,7 @@ jobs:
           (
             (
               set -euo pipefail
-              # 真源在 step 顶层 source 一次（规范 4.4）
+              # 真源在 step 顶层 source 一次（规范 · 通知函数的正确接法）
               source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
               aux_fail_notify() {
                 local msg="" reason="${1:-安装失败}"
@@ -3860,7 +3861,7 @@ jobs:
           cleanup_archive_outputs
           PID_FILE="/tmp/openclaw-archive.pid"
 
-          # 真源只在 step 顶层 source 一次（规范 4.4）：本 step 的归档循环会 fork
+          # 真源只在 step 顶层 source 一次（规范 · 通知函数的正确接法）：本 step 的归档循环会 fork
           # 子进程调用 send_telegram_alert，函数体内再 source 不会改父 shell 的
           # 函数表，调用点若对 send_tg 做本地覆写会被静默还原成真发。
           # 2026-10-06：systemd 单元不继承 GitHub Actions 的环境，GITHUB_WORKSPACE
@@ -3906,7 +3907,7 @@ jobs:
               local run_id="${GITHUB_RUN_ID:-manual}"
               # 统一 HTML 版式 + 统一收尾区（tg_add_* 内置转义，值原样传入即可；
               # 二次 escape_html 会把 & 变成 &amp;amp; 字面量直出）。真源已在 step
-              # 顶层 source（规范 4.4），函数体只用助手、不再重复 source。
+              # 顶层 source（规范 · 通知函数的正确接法），函数体只用助手、不再重复 source。
               local full_msg=""
               tg_add_title full_msg "⚠️ 归档告警 · $(obj_label "$obj")"
               tg_add_path full_msg "对象" "$obj"
@@ -4212,7 +4213,7 @@ jobs:
           SHUTDOWN_DELAY_SECONDS=$((SLEEP_SECONDS - SHUTDOWN_WARNING_BEFORE_MINUTES*60))
           if [ "${SHUTDOWN_DELAY_SECONDS}" -lt 0 ]; then SHUTDOWN_DELAY_SECONDS=0; fi
 
-          # 真源只在 step 顶层 source 一次（规范 4.4）：本函数会以 `&` 后台执行，
+          # 真源只在 step 顶层 source 一次（规范 · 通知函数的正确接法）：本函数会以 `&` 后台执行，
           # 函数体内再 source 只改子 shell 的函数表——调用点若对 send_tg 做本地
           # 覆写会被静默还原成真发，且子 shell 里看不出任何异常。
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
@@ -4220,7 +4221,7 @@ jobs:
           send_final_archive_warning() {
             sleep "${WARNING_DELAY_SECONDS}"
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-              # 统一 HTML 版式 + 统一收尾区（真源已在 step 顶层 source，规范 4.4）
+              # 统一 HTML 版式 + 统一收尾区（真源已在 step 顶层 source，规范 · 通知函数的正确接法）
               msg=""
               tg_add_title msg "ℹ️ OpenClaw 约 ${FINAL_ARCHIVE_WARNING_BEFORE_MINUTES} 分钟后进入收尾"
               # A1 反转：真正停手点是 T-2 停机倒计时，本条只是预告——收尾前仍可正常使用
@@ -4368,7 +4369,7 @@ jobs:
         if: ${{ always() && steps.dropbox_preflight.conclusion != 'failure' }}
         run: |
           set -euo pipefail
-          # 通知真源在 step 顶层 source 一次（勿挪进下面的函数体，理由见启动步骤同名注释 / 规范 4.4）
+          # 通知真源在 step 顶层 source 一次（勿挪进下面的函数体，理由见启动步骤同名注释 / 规范 · 通知函数的正确接法）
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
           # 2026-10-22 对象级锁（值须与 Start background archive loop 侧保持一致，
           # 改需两处同改）：互斥粒度按对象分 —— 主包流式归档与四个小对象归档
@@ -4659,7 +4660,7 @@ jobs:
             local obj="$1" verdict="$2" reason="${3:-}" detail="${4:-}"
             if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
               local run_id="${GITHUB_RUN_ID:-manual}"
-              # 真源已在 step 顶层 source（规范 4.4）：本函数被收尾 step 在主 shell 里直接调用，
+              # 真源已在 step 顶层 source（规范 · 通知函数的正确接法）：本函数被收尾 step 在主 shell 里直接调用，
               # 函数体内再 source 一次会覆盖调用点的本地覆写（此前靠 source 幂等侥幸无碍）
               local full_msg=""
               # 标题区分阶段：周期归档与最终归档走两个函数，此前标题完全相同，
@@ -5527,6 +5528,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           echo "Triggering next openclaw.yml run. GitHub Actions concurrency will keep it singleton."
@@ -5544,15 +5546,18 @@ jobs:
             sleep 2
           done
           if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ] && [ -n "$_new" ]; then
-            # 用 printf 拼多行：heredoc/多行字符串会把 YAML 块缩进打乱
-            _txt="$(printf '🔄 新 run 已启动\n\n旧 run: https://github.com/%s/actions/runs/%s\n新 run: https://github.com/%s/actions/runs/%s' \
-              "${{ github.repository }}" "${{ github.run_id }}" "${{ github.repository }}" "$_new")"
-            curl -sS --max-time 20 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-              --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-              --data-urlencode "text=${_txt}" \
-              --data-urlencode "disable_web_page_preview=true" >/dev/null \
-              && echo "✅ 新 run 链接已发送: #${_new}" \
-              || echo "::warning::新 run 链接发送失败（不影响接力）"
+            # 走发送层：标题/机器值/收尾区按规范（规范 · 结果通知）
+            source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+            _msg=""
+            tg_add_title _msg "🔄 新 run 已启动"
+            tg_add_path _msg "旧 run" "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            tg_add_path _msg "新 run" "https://github.com/${{ github.repository }}/actions/runs/${_new}"
+            tg_add_footer _msg
+            if send_tg "$_msg"; then
+              echo "✅ 新 run 链接已发送: #${_new}"
+            else
+              echo "::warning::新 run 链接发送失败（不影响接力）"
+            fi
           else
             echo "::warning::未能解析新 run id 或 TG 凭据缺失，跳过链接通知"
           fi

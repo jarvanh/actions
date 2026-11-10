@@ -291,7 +291,7 @@ openclaw gateway restart
 > 接力轮会把同一套启动逻辑再跑一遍——同一个服务、同一份账号池，通知内容与上一条完全相同。
 > 判据是 `/tmp/workbuddy-serve-run-tag`（每 run 一台新 runner，重启即归零），
 > 仅在服务真的起来时写；接力轮只往 CI 日志打一行 `ℹ️ …跳过重复的就绪通知`。
-> 判定规则与写法见 [`telegram-notify.md`](telegram-notify.md) 4.4 节。
+> 判定规则与写法见 [`telegram-notify.md`](telegram-notify.md)「规范 · 通知函数的正确接法」。
 
 > 「接口」写 `http://127.0.0.1:8318/v1`。**注意区分两个「默认」**：workbuddy-gateway
 > 上游 `-port` 默认值是 **8317**，与 OpenClaw 主 AI 网关（OmniRoute `:20128`，旧 CliRelay/CLIProxyAPI 曾占 8317）撞车，
@@ -318,14 +318,14 @@ openclaw gateway restart
 > `modelStates[].cooldownUntil` 的**最小值**（`模型冷却 N · 最早 HH:MM 恢复`）。
 > 一律给绝对时刻、不折算「还剩多久」—— 通知是快照，读者看到时相对时长已不准。
 > `cooldownMsg` 与 `nickname` / `uid` 一样**不进通知**。
-> 字段口径、目录接口与免费判据逐条见 [`telegram-notify.md`](telegram-notify.md) 2.5 节。
+> 字段口径、目录接口与免费判据逐条见 [`telegram-notify-registry.md`](telegram-notify-registry.md) 3.1 节。
 
 > trae2api 三条通知与 workbuddy-gateway **版式同源**（同为 AI 网关形态），差异只在数据
 > 来源：版本写 **Release tag**（2026-10-05 起取 fork 的 Release 静态二进制部署，不再
 > 浅克隆源码构建），账号池来自批量签到输出；「原始输出」非空才渲染。版式真源是
 > trae2api 步骤内的 `trae_notify()` 函数，独立按需签到 workflow `trae2api-notify.yml`
 > 已移除（2026-09-22）。
-> 字段口径见 [`telegram-notify.md`](telegram-notify.md) 2.5 节末。
+> 字段口径见 [`telegram-notify-registry.md`](telegram-notify-registry.md) 3.2 节。
 
 > `<对象>` 为归档短名：`OpenClaw 主包` / `ZCode` / `OmniRoute` / `rsstt` /
 > `rss-to-telegram`。此前五类归档共用「OpenClaw 归档告警」一个标题，无法从标题

@@ -801,22 +801,22 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     # 不再恒 ✅（此前 ✅ 标题下写着 ⚠️ 疑似未走代理，与 rc=1 的失败判定自相矛盾）
     # 来源标签（PROXY_SPEEDTEST_LABEL）：编排层 proxy-speedtest-gistnodes 调用时传
     # 「gist 节点」，标题变成「gist 节点 · 泰尔三网测速」。同一套测速会被定时轮和 gist 抓取轮
-    # 分别触发，标题不区分的话读者分不清通知来自哪一轮（规范 · 3.1 允许标题带区分词）。
+    # 分别触发，标题不区分的话读者分不清通知来自哪一轮（规范 · 标题与分隔线允许标题带区分词）。
     # ⚠️ 这一行是 2026-09-14 补的：上面的注释与下面的 f-string 早就在了，**赋值行却漏了**，
     # 于是标题一渲染就 `NameError: name '_title_emoji' is not defined`，整条通知发不出去
     # （`telegram_send_failed`，而 job 照样「成功」——通知失败不改 exit code，所以静默了）。
-    # 判据与注释、规范（规范 · 3.x 测速三套：0 成功 / 疑似未走代理降级 ⚠️）一致。
+    # 判据与注释、规范（台账 1.6：0 成功 / 疑似未走代理降级 ⚠️）一致。
     _title_emoji = '⚠️' if (not ok_results or bypass_hits or aborted_due_to_runtime) else '✅'
     _label = (merged_env().get('PROXY_SPEEDTEST_LABEL') or '').strip()
     _title_prefix = f'{_label} · ' if _label else ''
     lines = [
         f'{_title_emoji} {_title_prefix}泰尔三网测速',
         sep,
-        f"🕒 起止：{esc(meta['started_text'])} ~ {esc(meta['ended_text'])} · 耗时 {esc(meta['duration_text'])}",
+        f"🗓 起止：{esc(meta['started_text'])} ~ {esc(meta['ended_text'])} · 耗时 {esc(meta['duration_text'])}",
         # 计数口径与 cdn/gitee 统一用「可用」（成功=功能可用，含节点连接成功但速度偏低）
         f"📊 节点：共 {len(results)} 个 · 可用 {len(ok_results)} 个",
         # 到点收摊 / 运行中中止：**不是失败**（退出码仍 0），但必须说清，否则读者会以为
-        # 「只测了这么几个」是订阅本身的问题（规范 · 2.7 测速三套）
+        # 「只测了这么几个」是订阅本身的问题（台账 1.6）
         *([f'⚠️ 本轮已中止：{esc(runtime_abort_reason)}'] if aborted_due_to_runtime else []),
         # 取值行口径（规范 · 取值行口径）：测速点与模式都取自引擎参数（机器返回值），整行同为等宽
         # 不用 📍：紧随其后的「📍 测速点网络」分节（共享层）已占用该 emoji，
@@ -868,7 +868,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     # 拿不到表 ⇒ 探测层整体关闭、不产生判死条目（机制没给结论就不能判死）；拿到了 ⇒
     # 「表里没有」是 mihomo 的真判死结论，与测速失败同类，直接进下面的 `❌ 失败`。
     # 旧分节记的是「探测机制没跑通」的误伤（逐个探 `/proxies/{name}` 恒 404 时每轮必现），
-    # 新判据下不复存在；若再出现该分节即为回退（规范 · 2.8 taier 专属分节）。
+    # 新判据下不复存在；若再出现该分节即为回退（台账 1.6）。
     if failed:
         lines.append(f'❌ 失败 · {len(failed)}')
         _failed_entries = []
@@ -1116,7 +1116,7 @@ def _run():
     results = []
     bypass_hits = 0
     # 「到点收摊」与「运行中中止」共用这一对标志：通知降 ⚠️ + 正文补一行，但**都不算失败**
-    # （退出码仍 0），拿已测节点照常出订阅（规范 · 2.7 测速三套）
+    # （退出码仍 0），拿已测节点照常出订阅（台账 1.6）
     aborted_due_to_runtime = False
     runtime_abort_reason = ''
     _probe_alive = 0
