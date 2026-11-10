@@ -1135,23 +1135,35 @@ def ensure_test_file(size_mib: int):
     return path
 
 def git_prepare_work_repo(repo_dir: pathlib.Path, remote: str, env, branch_name: str):
+    """准备**只含本次待传文件**的空仓库（不 clone 远端）。
+
+    为什么不再 clone（2026-11-10 修）：上传测速只需要「把这份文件推上去」，
+    远端历史与工作区内容一概不用。旧实现 `git clone --depth 1 --branch <b>`
+    带来三个纯负债：
+
+      1. **每个节点白下载 10MiB**：clone 段不参与计时，却真实走节点链路，
+         单节点多花 ~10 秒、并把「Cloning into …」类失败拉进上传路径
+         （run 42683659942：323 个节点 161 个失败，其中 73 个是 clone 段）。
+      2. **给 delta 压缩提供了 base**：clone 下来的上一个提交带着同尺寸 blob，
+         新文件只差 16 字节 nonce ⇒ push 只传 ~1KB 增量（见 `_inject_upload_nonce`）。
+         实测（本地 bare 仓库 + 计数 TCP 代理）：线上 1498B，代码却按 10MiB 计时。
+      3. **shallow 历史**：从 `--depth 1` 仓库 push 会带 shallow 标记，Gitee 侧
+         偶发 `! [remote rejected] (shallow update not allowed)`。
+
+    改成 `git init` + 单条 origin 后：push 是全新 root 提交，远端没有可比对的
+    对象，delta 无从发生；顺带省掉每节点 10MiB 预下载与 shallow 失败模式。
+    仍保留 `-f`：远端同分支的旧历史被整体替换（旧对象由 Gitee GC 回收）。
+    """
     shutil.rmtree(repo_dir, ignore_errors=True)
-    code, out, err = run(
-        ['git', 'clone', '--depth', '1', '--single-branch', '--branch', branch_name, remote, str(repo_dir)],
-        env=env,
-        timeout=120,
-    )
-    if code != 0:
-        shutil.rmtree(repo_dir, ignore_errors=True)
-        repo_dir.mkdir(parents=True, exist_ok=True)
-        steps = [
-            ['git', 'init', '-b', branch_name],
-            ['git', 'remote', 'add', 'origin', remote],
-        ]
-        for cmd in steps:
-            code2, out2, err2 = run(cmd, cwd=repo_dir, env=env, timeout=60)
-            if code2 != 0:
-                raise RuntimeError((err2 or out2 or 'git prepare failed')[-400:])
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    steps = [
+        ['git', 'init', '-b', branch_name],
+        ['git', 'remote', 'add', 'origin', remote],
+    ]
+    for cmd in steps:
+        code, out, err = run(cmd, cwd=repo_dir, env=env, timeout=60)
+        if code != 0:
+            raise RuntimeError((err or out or 'git prepare failed')[-400:])
     config_steps = [
         ['git', 'config', 'user.name', 'Javis'],
         ['git', 'config', 'user.email', 'javis@bot.ai'],
@@ -1166,6 +1178,15 @@ def git_prepare_work_repo(repo_dir: pathlib.Path, remote: str, env, branch_name:
         # 默认 1 分钟 speed 保护会误杀正常传输（表现为 early EOF / RPC failed）
         ['git', 'config', 'http.lowSpeedLimit', '0'],
         ['git', 'config', 'http.lowSpeedTime', '999999'],
+        # ⚠️ 关闭 **push 侧 delta 压缩**（2026-11-10 修，上传假值的根因之二）：
+        # 只注入 16 字节 nonce 能绕过「对象去重」，绕不过「thin pack 增量」——
+        # 远端若有同尺寸的近似 blob，push 会只传一个 ~1KB 的 delta，而代码仍按
+        # `10MiB ÷ push 耗时` 换算，读数变成握手 RTT 的倒数（实测虚高约 5000 倍）。
+        # 上面的 init 路径已让远端无从比对；这里再显式关掉 delta 作为第二道保险
+        # （即使将来改回 clone，也不会静默退化）。实测同一场景：
+        #   默认配置 → 线上 895B；`pack.window=0` → 线上 10,489,505B（= 全量）。
+        ['git', 'config', 'pack.window', '0'],
+        ['git', 'config', 'pack.depth', '0'],
     ]
     for cmd in config_steps:
         code, out, err = run(cmd, cwd=repo_dir, env=env, timeout=60)
@@ -1196,10 +1217,14 @@ def _inject_upload_nonce(path: pathlib.Path):
       * 只改副本，`file_path` 指向的缓存文件不被污染（仍可跨节点复用，不重复
         urandom 10MiB 的开销）；
       * 大小不变（仅覆写前 16 字节）⇒ 字节数换算不受影响；
-      * blob 哈希必变 ⇒ git 无法去重 ⇒ 每次 push 都真传 10MiB。
+      * blob 哈希必变 ⇒ git 无法**按对象去重**。
 
-    一处修改覆盖全部调用方：`upload_speedtest` 是 CDN / Gitee 单节点 / runner 直连基线三处
-    的共享实现，最终都走到本文件的 `git_force_push_testfile`。
+    ⚠️ 2026-11-10 更正：nonce 只能挡住「同 blob 去重」，**挡不住 thin-pack delta**。
+    git 会把新 blob 对远端已有的上一个 blob（同一轮内只差这 16 字节）做增量，
+    线上仍只传 ~1KB。真正的防线是 `git_prepare_work_repo`：不 clone（无 base）
+    + `pack.window`/`pack.depth` 置 0（禁用 push 侧 delta）。
+    `tests/test_upload_nonce.py` 已改为断言**线上字节**，不再看仓库磁盘增长
+    （`index-pack --fix-thin` 会把 base 补写进新 pack，磁盘恒增 10MiB，测不出真相）。
     """
     try:
         with open(path, 'r+b') as f:
