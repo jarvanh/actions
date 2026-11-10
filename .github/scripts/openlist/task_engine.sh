@@ -299,7 +299,19 @@ _run_registry_pairs_parallel() {
       [ -n "${_pp_pid[$_pp_k]:-}" ] && _pp_abandoned=$((_pp_abandoned + 1))
     done
     if [ "$_pp_abandoned" -gt 0 ]; then
-      echo "⚠️ 硬顶放弃在途同步对 ${_pp_abandoned} 个（未完成，留待下个循环重试；本轮传输量/修复统计可能偏低）"
+      # 在途已结算字节（2026-11-10 加，run 42706236473 实证）:
+      #   该轮 Copied 365 个文件、心跳显示「在途 156.434 MiB」，收尾却打
+      #   「本轮 0 个（失败 0）· 传输 0 B」—— 因为两个 worker 都被硬顶放弃、
+      #   从未写 .done，total_transferred 只统计 .done。日志与事实矛盾，
+      #   会让人误判"整轮零产出"（实测我自己就先怀疑了一轮）。
+      #   这里把实时记账文件（与心跳同源）的和一并报出，标明是"在途已结算"，
+      #   不并入 total_transferred（那会与 trend 重复计数）。
+      local _pp_settled=0 _pp_line
+      while IFS= read -r _pp_line; do
+        [[ "$_pp_line" =~ ^[0-9]+$ ]] && _pp_settled=$((_pp_settled + _pp_line))
+      done < "${TREND_TRANSFERRED_LOG:-/tmp/ol_trend_transferred.log}" 2>/dev/null || true
+      echo "⚠️ 硬顶放弃在途同步对 ${_pp_abandoned} 个（未完成，留待下个循环重试）"
+      echo "   在途已结算 $(format_bytes "$_pp_settled")（来自实时记账文件，与心跳同源；不作为本轮完成量）"
     fi
     echo "并行同步对完成: 本轮 ${_done_n} 个（失败 ${_failed_n}）· 传输 $(format_bytes "$total_transferred") · 下轮游标 → 第 $((_resume + 1))/${n} 个"
   fi
