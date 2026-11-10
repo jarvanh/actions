@@ -55,12 +55,17 @@ BASE_MARKER="${BASE_MARKER:-0}"
 
 # ── 0.5 继任者未就绪就到了死线（优雅重启早于 T-12min 触发等）：最多再等 5min ──
 _ns="$(handoff_new_state "$SID")"
+# 继任者已自我放弃 = 无需再等，立刻回退（否则要白等 5min，服务白白多停 5 分钟）
+if [ "$_ns" = "aborted" ]; then
+  abort_handoff "继任者已自我放弃（state=aborted）"
+fi
 if ! printf '%s' "$_ns" | grep -qE '^(ready|rsync_started|rsync_done|serving)$'; then
   echo "⏳ [cutover] 继任者尚未 ready（state=${_ns:-<无标记>}），最多再等 5min…"
   _ok=0
   for _i in $(seq 1 60); do
     _ns="$(handoff_new_state "$SID")"
     if printf '%s' "$_ns" | grep -qE '^(ready|rsync_started|rsync_done|serving)$'; then _ok=1; break; fi
+    if [ "$_ns" = "aborted" ]; then abort_handoff "继任者已自我放弃（state=aborted）"; fi
     case "$(handoff_run_status "$SID")" in completed|failure|cancelled) break ;; esac
     sleep 5
   done
@@ -133,6 +138,11 @@ for _i in $(seq 1 $(( HANDOFF_SERVING_WAIT_SEC / 5 ))); do
       stop_rsyncd
       echo "🎉 [cutover] 继任者已 serving → handoff_done（本轮回退为纯备份收尾，不再 Trigger next）"
       exit 0
+      ;;
+    aborted)
+      # 继任者主动放弃（rsync 失败/校验失败）：立刻回退，不必等 run 状态或 15min 超时。
+      # 每 5s 轮询一次，最坏 5s 就知道，把暂停的服务尽快拉回传统收尾。
+      abort_handoff "继任者自我放弃（state=aborted）"
       ;;
   esac
   _chk=$((_chk + 1))

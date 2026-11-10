@@ -95,6 +95,15 @@ echo "📊 [takeover] zc rsync: $(grep -E 'total transferred file size|Number of
 _qc="$(timeout 60 sqlite3 "$HOME/.openclaw/state/openclaw.sqlite" 'PRAGMA quick_check;' 2>&1 | head -n 1 || true)"
 [ "$_qc" = "ok" ] || abort_takeover "state/openclaw.sqlite quick_check 异常（${_qc:-<无输出>}）"
 
+# 2026-11-10 窗口收口：rsync 慢于旧轮的 15min 上限时，旧轮可能已经 abort 并回退传统
+# 收尾（归档 + Trigger next）。此刻若还照原始计划起服务，就会出现「继任者 + 旧轮接力
+# 起来的新 run」双服。故在宣布 rsync_done 前再核一次交出状态：只有仍是 handing_over
+# 才允许上线；aborted/archives_done/handoff_done 一律放弃。
+_st_final="$(handoff_old_state "${HANDOFF_OF}")"
+if [ "$_st_final" != "handing_over" ]; then
+  abort_takeover "rsync 完成后发现旧轮已回退（state=${_st_final:-<无标记>}），放弃上线避免双服"
+fi
+
 handoff_put "$HANDOFF_NEW_REMOTE" "$(handoff_new_json rsync_done)"
 echo "✅ [takeover] 增量已同步并校验（rsync_done）—— 后续步骤用同步后的状态启动服务"
 exit 0
