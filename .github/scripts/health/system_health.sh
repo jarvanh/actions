@@ -45,8 +45,21 @@ fi
 st=$(systemctl --user is-active rclone-dropbox 2>/dev/null || true)
 if [ "$st" = active ]; then ok_notes+=("rclone=$st"); else fails+=("❌ rclone-dropbox: ${st:-unknown}"); fi
 
-# 3) 已安装的 cftun-* 隧道
+# 3) 已安装的 cftun-* 隧道 —— 先自愈一次再判定
+# 2026-11-10：平行会话跑 handoff 测试时 cutover.sh 会真的 stop 生产隧道（测试隔离缺陷），
+# 隧道被停后不会自己回来。这里先 start 一次，3 秒后复检，仍起不来才告警。
 units=$(systemctl list-units --all --plain --no-legend 'cftun-*.service' 2>/dev/null | awk '{print $1}' | sed 's/\.service$//')
+healed=0
+for u in $units; do
+  st=$(systemctl is-active "$u" 2>/dev/null || true)
+  if [ "$st" != active ]; then
+    sudo systemctl start "$u" >/dev/null 2>&1 && healed=1
+  fi
+done
+if [ "$healed" = 1 ]; then
+  sleep 3
+  ok_notes+=("tunnels=自动拉起")
+fi
 for u in $units; do
   st=$(systemctl is-active "$u" 2>/dev/null || true)
   [ "$st" = active ] && ok_notes+=("$u=active") || fails+=("❌ $u: ${st:-unknown}")
@@ -59,6 +72,11 @@ done
 boot_age_min=$(( ( $(date +%s) - $(stat -c %Y /proc/1 2>/dev/null || date +%s) ) / 60 ))
 
 # 4) quota-board
+# 一次性自愈：看板依赖 /dropbox 上的 board.py，挂载抖动后会 exit 120 且自己起不来
+if [ "$boot_age_min" -ge 40 ] && ! systemctl --user is-active quota-board >/dev/null 2>&1; then
+  systemctl --user start quota-board >/dev/null 2>&1 || true
+  sleep 2
+fi
 if [ "$boot_age_min" -lt 40 ] && ! systemctl --user is-active quota-board >/dev/null 2>&1; then
   ok_notes+=("board=skip(启动期 ${boot_age_min}m)")
 elif systemctl --user is-active quota-board >/dev/null 2>&1; then
