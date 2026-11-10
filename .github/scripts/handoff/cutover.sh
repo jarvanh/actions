@@ -148,9 +148,12 @@ done
   || abort_handoff "rsync daemon 未监听 ${HANDOFF_RSYNC_PORT}（日志: $(tail -n 3 /tmp/rsyncd-handoff.log 2>/dev/null | tr '\n' ' '))"
 echo "✅ [cutover] rsync 源就绪（${TS_IP}:${HANDOFF_RSYNC_PORT}，只读，仅 tailnet 可达）"
 
-# ── 3.5 Phase 1.5：后台快照 AI 栈（停服+归档+上传），与继任者 rsync 并行 ──
-# 必须在 handing_over **之后**才可能被继任者消费，但启动可以提前：越早开跑，
-# 模型通道越早恢复。失败不影响交出本身（继任者 gate 超时降级）。
+# ── 4. 交出标记 → 等 serving ──
+handoff_put "$HANDOFF_OLD_REMOTE" "$(handoff_old_json handing_over "$SID" "$TS_IP" "$CUTOVER_TS" "$BASE_MARKER")"
+# ── 3.5 Phase 1.5（必须在 handing_over 之后：ai-archives 用 old.json 的
+# ownership 自证「本机确是本轮旧轮」，先启会读到上一轮 owner 而拒跑 —— 实测踩到）：后台快照 AI 栈（停服+归档+上传），与继任者 rsync 并行 ──
+# 位置：紧随 handing_over 之后（既让 ai-archives 的 ownership 自检能通过，
+# 又不拖慢交出）。失败不影响交出本身（继任者 gate 超时降级）。
 # 2026-11-10：默认**不**在交出瞬间停 AI 栈 —— 实测快照要 ~8min，比「AI 栈在线到
 # 归档后、继任者等 archives_done」（~213s）更慢。只有 OPENCLAW_AI_EARLY=1 才启用。
 if [ "${OPENCLAW_AI_EARLY:-}" = "1" ] && [ -f "$GITHUB_WORKSPACE/.github/scripts/handoff/ai-archives.sh" ]; then
@@ -160,8 +163,7 @@ if [ "${OPENCLAW_AI_EARLY:-}" = "1" ] && [ -f "$GITHUB_WORKSPACE/.github/scripts
   echo "🚀 [cutover] AI 栈快照已后台开跑（与 rsync 并行）"
 fi
 
-# ── 4. 交出标记 → 等 serving ──
-handoff_put "$HANDOFF_OLD_REMOTE" "$(handoff_old_json handing_over "$SID" "$TS_IP" "$CUTOVER_TS" "$BASE_MARKER")"
+
 echo "🤝 [cutover] 已交出（handing_over），等继任者 serving（≤${HANDOFF_SERVING_WAIT_SEC}s）…"
 _chk=0
 for _i in $(seq 1 $(( HANDOFF_SERVING_WAIT_SEC / 5 ))); do
