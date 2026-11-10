@@ -17,8 +17,9 @@
 #   - quota-board 是否 active 且 8321 在听
 #   - OpenClaw gateway 18789 是否在听
 #
-# 状态文件 /tmp/system-health-state，只在「正常→异常」「异常组合变化」「异常→恢复」
-# 时发送，避免每 5 分钟刷屏；异常持续时每 6 小时补一条提醒。
+# 状态文件 /tmp/system-health-state（签名/时间戳/是否真的告过警/上次异常明细），只在
+# 「正常→异常」「异常组合变化」「异常→恢复」时发送，避免每 5 分钟刷屏；异常持续时
+# 每 6 小时补一条提醒。恢复通知只列「确实告过警」的项，绝不凭签名臆测。
 set -u
 
 TG_LIB="${TG_LIB:-$HOME/.openclaw/bin/tg_notify.sh}"
@@ -108,30 +109,41 @@ fi
 # 展示时间统一东八区（规范 · 日期与相对时间）。hosted runner 系统时区是 UTC，
 # date -u 直出会比北京时间早 8 小时，主人对不上。
 now=$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M（东八区）')
+# 空异常列表的签名口径必须与 signature 完全一致（printf 输出一个换行）。
+# 2026-11-10 事故：此处曾写成 md5('')，与 md5("\n") 永不相等，于是每次全绿都被
+# 判成「从异常恢复」，每 5 分钟发一条假恢复通知（"此前异常"根本不存在）。
+EMPTY_SIG=$(printf '%s\n' "" | md5sum | cut -d' ' -f1)
 signature=$(printf '%s\n' "${fails[@]:-}" | md5sum | cut -d' ' -f1)
-prev_sig=""; prev_at=0
-if [ -f "$STATE" ]; then
-  prev_sig=$(sed -n '1p' "$STATE" 2>/dev/null || true)
-  prev_at=$(sed -n '2p' "$STATE" 2>/dev/null || true)
-  case "$prev_at" in ''|*[!0-9]*) prev_at=0 ;; esac
-fi
 
-printf '%s\n%s\n' "$signature" "$(date +%s)" > "$STATE" 2>/dev/null || true
+# 状态文件四段：签名 / 时间戳 / 是否真的发过告警(0|1) / 上次异常明细（逐行）。
+# 旧版两行格式读进来 notified=0、无明细，不会误触发恢复通知。
+prev_sig=""; prev_at=0; prev_notified=0; prev_fails=()
+if [ -f "$STATE" ]; then
+  mapfile -t _st < "$STATE" 2>/dev/null || _st=()
+  prev_sig=${_st[0]:-}; prev_at=${_st[1]:-0}; prev_notified=${_st[2]:-0}
+  prev_fails=("${_st[@]:3}")
+  case "$prev_at" in ''|*[!0-9]*) prev_at=0 ;; esac
+  [ "$prev_notified" = 1 ] || prev_notified=0
+fi
 
 echo "[health] $now fails=${#fails[@]} ${ok_notes[*]}"
 [ ${#fails[@]} -eq 0 ] || printf '  %s\n' "${fails[@]}"
 
+# --quiet 是调试口，不落状态，避免测试结果污染下一轮真实判定
 if [ "$QUIET" = 1 ]; then exit 0; fi
 
-should_send=0
+should_send=0; kind=""
 if [ ${#fails[@]} -gt 0 ]; then
-  if [ "$FORCE" = 1 ] || [ "$signature" != "$prev_sig" ]; then should_send=1; fi
+  kind="alert"; should_send=1
+  [ "$FORCE" = 0 ] && [ "$signature" = "$prev_sig" ] && should_send=0
   # 持续异常：每 6 小时补一条，避免彻底静默
-  if [ "$should_send" = 0 ] && [ $(( $(date +%s) - prev_at )) -ge 21600 ]; then should_send=1; fi
-else
-  # 恢复通知：上一次是异常、这次全绿
-  if [ "$prev_sig" != "$(printf '' | md5sum | cut -d' ' -f1)" ] && [ -n "$prev_sig" ] && [ "$FORCE" = 0 ]; then should_send=1; fi
-  [ "$FORCE" = 1 ] && should_send=1
+  if [ "$FORCE" = 0 ] && [ "$should_send" = 0 ] && [ $(( $(date +%s) - prev_at )) -ge 21600 ]; then should_send=1; fi
+elif [ "$prev_notified" = 1 ] && [ ${#prev_fails[@]} -gt 0 ]; then
+  # 只有「确实告过警」才允许说恢复，并列出恢复了什么
+  kind="recover"; should_send=1
+elif [ "$FORCE" = 1 ]; then
+  # 人工验证：全绿就报全绿，不编造「此前异常」
+  kind="ok"; should_send=1
 fi
 [ "$should_send" = 1 ] || exit 0
 
@@ -152,11 +164,21 @@ host=$(hostname 2>/dev/null || echo runner)
 #   - 常驻服务没有 run 上下文，收尾用 🕒 报告时刻（规范 · 收尾区「常驻服务例外」）
 #   - 计数放分节标题 " · N"
 msg=""
-if [ ${#fails[@]} -eq 0 ]; then
+if [ "$kind" = "recover" ]; then
   tier=""
   tg_add_title msg "✅ 系统健康恢复"
   tg_add_path msg "主机" "$host"
-  tg_add_note msg "此前异常的检查项已全部恢复正常"
+  tg_add_section msg "🔍 已恢复 · ${#prev_fails[@]}"
+  _lines=""
+  for f in "${prev_fails[@]}"; do
+    _lines+="$(escape_html "${f#❌ }")"$'\n'
+  done
+  tg_add_block msg "$(tree_lines "${_lines%$'\n'}")"
+elif [ "$kind" = "ok" ]; then
+  tier=""
+  tg_add_title msg "✅ 系统健康正常"
+  tg_add_path msg "主机" "$host"
+  tg_add_note msg "全部检查项通过"
 else
   tier="alert"
   tg_add_title msg "🚨 系统级故障 · ${#fails[@]} 项"
@@ -180,10 +202,14 @@ if [ "$PRINT" = 1 ]; then
   printf '%s\n' "$msg"
   exit 0
 fi
-if [ ! -f "$TG_LIB" ]; then
-  echo "[health] ⚠️ 缺少 $TG_LIB，跳过 TG 通知"
-  exit 0
+# 发送成功才落状态：失败时保留旧状态，下一轮同一判据会重试；告警成功才允许后续
+# 发「恢复」，不会出现「没告警却报恢复」。
+if send_tg "$msg" "${tier:-}"; then
+  if [ "$kind" = "alert" ]; then
+    { printf '%s\n%s\n1\n' "$signature" "$(date +%s)"; printf '%s\n' "${fails[@]}"; } > "$STATE" 2>/dev/null || true
+  else
+    printf '%s\n%s\n0\n' "$EMPTY_SIG" "$(date +%s)" > "$STATE" 2>/dev/null || true
+  fi
+else
+  echo "[health] ⚠️ TG 发送失败（凭据或网络），状态未更新，下一轮重试"
 fi
-# shellcheck disable=SC1090
-source "$TG_LIB"
-send_tg "$msg" "${tier:-}" || echo "[health] ⚠️ TG 发送失败（凭据或网络）"
