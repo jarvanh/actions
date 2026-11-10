@@ -36,9 +36,11 @@ source "$here/protocol.sh"
 handoff_init
 _owner="$(handoff_get "$HANDOFF_OLD_REMOTE" '.old_run')"
 _sid_file="$HANDOFF_STATE_DIR/successor-run-id"
-if [ ! -f "$_sid_file" ] || [ "$_owner" != "${GITHUB_RUN_ID:-}" ]; then
-  echo "⛔ [ai-archives] 本机不是已武装交接的旧轮（owner=${_owner:-<无>} run=${GITHUB_RUN_ID:-<无>}），拒跑 —— 拒绝停任何服务"
-  exit 1
+# 2026-11-11：owner 只告警不拒跑 —— cutover（0b4c1fd）已保证先写 handing_over 再拉起
+# 本脚本，正常时 owner=本 run；若仍是上一轮 owner 说明 marker 写入失败，此时本机确已
+# 进入收尾，停 AI 栈仍正确，只是 marker 不可信 → 继任者闸门走超时降级（不再白停 25min）
+if [ "$_owner" != "${GITHUB_RUN_ID:-}" ]; then
+  echo "⚠️ [ai-archives] old.json owner=${_owner:-<无>} ≠ 本 run ${GITHUB_RUN_ID:-<无>}（marker 写入可能失败），继续执行"
 fi
 # 测试模式：对象远端全部落到 handoff-test 前缀，不覆盖生产归档
 #（生产 omni/rsstt/z2a 包由测试机覆盖会污染真实恢复源 —— 这是测试对生产的

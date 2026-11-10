@@ -57,8 +57,15 @@ for _i in $(seq 1 $(( wait_sec / 5 ))); do
       if [ -s /tmp/openclaw-prefetch/OmniRoute.tar.gz ]; then
         : > "$PASS_FILE"; exit 0
       fi
+      # 2026-11-11 生产实测追加的兜底：ai.json 可能因身份闸拒跑/写入失败而缺失，
+      # 但 old.json 的 archives_done 同样证明 AI 数据已上 Dropbox（归档结果 tsv 实证）
+      if [ -s /tmp/openclaw-prefetch/OmniRoute.tar.gz ]; then
+        : > "$PASS_FILE"; exit 0
+      fi
       _ai="$(handoff_ai_state "${HANDOFF_OF}")"
       case "$_ai" in done) : > "$PASS_FILE"; exit 0 ;; esac
+      _old="$(handoff_old_state "${HANDOFF_OF}")"
+      case "$_old" in archives_done|handoff_done) : > "$PASS_FILE"; exit 0 ;; esac
       ;;
   esac
   sleep 5
