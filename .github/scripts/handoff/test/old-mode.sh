@@ -42,9 +42,19 @@ done
 echo "═══ [old] 停机瞬间：写最后一批 + 删一个基座文件（验证 rsync --delete）"
 echo "written at $(date '+%F %T')" > ~/.openclaw/workspace/last-minute.txt
 rm -f ~/.openclaw/workspace/base.txt
+# 真实量级载荷：模拟生产里 ~1.9GB 的 sqlite 增量（随机数据 = 不可压缩，最坏情况）
+PAYLOAD_MB="${PAYLOAD_MB:-1500}"
+if [ "$PAYLOAD_MB" -gt 0 ]; then
+  echo "注入 ${PAYLOAD_MB}MB 真实载荷（不可压缩）…"
+  dd if=/dev/urandom of=~/.openclaw/workspace/payload.bin bs=1M count="$PAYLOAD_MB" status=none
+  ls -lh ~/.openclaw/workspace/payload.bin
+fi
 kill "$GW" "$LIVEPID" 2>/dev/null || true
 STOP_EPOCH=$(date +%s)
 echo "stop_epoch=$STOP_EPOCH"
+printf '{"stop_epoch":%s,"payload_mb":%s,"archive_sim_seconds":%s}' \
+  "$STOP_EPOCH" "${PAYLOAD_MB:-0}" "${ARCHIVE_SIM_SECONDS:-0}" \
+  | rclone rcat "${HANDOFF_REMOTE_DIR}/timing.json"
 
 echo "═══ [old] 交出（真 cutover.sh）"
 if bash "$HS/cutover.sh"; then
@@ -55,7 +65,11 @@ if bash "$HS/cutover.sh"; then
   echo "║ 停机→继任者 serving: $((DONE_EPOCH - STOP_EPOCH))s（轮询粒度 5s）"
   echo "║ 继任者 run: $(cat "$S/successor-run-id" 2>/dev/null || echo '?')"
   echo "╚══════════════════════════════════════════════"
-  # 模拟旧轮最终归档完成后推进 archives_done，并验证继任者的闸门
+  # 仿真旧轮最终归档耗时（生产实测：主包 243s + 其余 ~45s）
+  ARCHIVE_SIM_SECONDS="${ARCHIVE_SIM_SECONDS:-300}"
+  echo "═══ [old] 仿真最终归档 ${ARCHIVE_SIM_SECONDS}s（模型通道要等的就是这段）"
+  sleep "$ARCHIVE_SIM_SECONDS"
+  # 归档完成 → 推进 archives_done，并验证继任者的闸门
   bash "$HS/mark-archives-done.sh"
   bash "$HS/gate.sh" archives_done
   echo "✅ [old] archives_done 已推进，gate 放行验证通过"

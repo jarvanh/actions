@@ -18,11 +18,17 @@ DONE_EPOCH=$(date +%s)
 
 echo "═══ [new] 上线回执（真 serving.sh）"
 bash "$HS/serving.sh"
+CHAT_READY=$(date +%s)
+STOP_EPOCH=$(rclone cat "${HANDOFF_REMOTE_DIR}/timing.json" 2>/dev/null | jq -r '.stop_epoch // 0' 2>/dev/null)
+case "${STOP_EPOCH:-0}" in ''|*[!0-9]*) STOP_EPOCH=0 ;; esac
+[ "$STOP_EPOCH" -gt 0 ] && echo "📉 [chat] 旧轮停机 → 聊天路径恢复: $(( CHAT_READY - STOP_EPOCH ))s"
 
 echo "═══ [new] 闸门（真 gate.sh archives_done，应阻塞到旧轮推进）"
 GATE_T0=$(date +%s)
 bash "$HS/gate.sh" archives_done
 echo "gate 等待 $(( $(date +%s) - GATE_T0 ))s 后放行"
+MODEL_READY=$(date +%s)
+[ "${STOP_EPOCH:-0}" -gt 0 ] && echo "📉 [model] 旧轮停机 → 模型通道放行: $(( MODEL_READY - STOP_EPOCH ))s"
 
 echo "═══ [new] 验收"
 fail=0
@@ -37,6 +43,11 @@ chk "标记归属正确(serving)" "$(rclone cat "${HANDOFF_REMOTE_DIR}/new.json"
 
 echo "╔══════════════════════════════════════════════"
 echo "║ 继任者就位→rsync 完成: $((DONE_EPOCH - READY_EPOCH))s"
+if [ "${STOP_EPOCH:-0}" -gt 0 ]; then
+  echo "║ 聊天路径下线(停机→serving):      $(( CHAT_READY - STOP_EPOCH ))s"
+  echo "║ 模型通道下线(停机→闸门放行):     $(( MODEL_READY - STOP_EPOCH ))s"
+  echo "║ ★ 整体下线(取最晚恢复的组件):   $(( MODEL_READY > CHAT_READY ? MODEL_READY - STOP_EPOCH : CHAT_READY - STOP_EPOCH ))s"
+fi
 echo "╚══════════════════════════════════════════════"
 [ "$fail" = "0" ] || { echo "❌ 验收失败 $fail 项"; exit 1; }
 echo "✅ [new] 全部验收通过"

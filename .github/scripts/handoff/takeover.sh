@@ -81,13 +81,20 @@ _zc_rc=0
 ( timeout 780 rsync -a --delete --timeout=60 --stats \
     rsync://"${OLD_TS_IP}:${HANDOFF_RSYNC_PORT}"/zc/ "$HOME/.zcode/" 2>&1 \
   | tail -n 4; exit "${PIPESTATUS[0]}" ) > /tmp/handoff-rsync-zc.log 2>&1 & _zc_pid=$!
+_rs_t0=$(date +%s)
 if ! timeout 780 rsync -a --delete --exclude-from="$EXCLUDES" --timeout=60 --stats \
       rsync://"${OLD_TS_IP}:${HANDOFF_RSYNC_PORT}"/oc/ "$HOME/.openclaw/" > /tmp/handoff-rsync-oc.log 2>&1; then
   wait "$_zc_pid" 2>/dev/null || true
   abort_takeover "openclaw 增量 rsync 失败（$(tail -n 3 /tmp/handoff-rsync-oc.log 2>/dev/null | tr '\n' ' ')）"
 fi
 wait "$_zc_pid" || _zc_rc=$?
-echo "📊 [takeover] oc rsync: $(grep -E 'total transferred file size|Number of regular files transferred' /tmp/handoff-rsync-oc.log 2>/dev/null | tr '\n' ' ')"
+_rs_t1=$(date +%s)
+_rs_bytes=$(awk -F': ' '/^Total transferred file size/{gsub(/,/,"",$2); print $2+0}' /tmp/handoff-rsync-oc.log 2>/dev/null | head -1)
+_rs_bytes="${_rs_bytes:-0}"
+_rs_sec=$(( _rs_t1 - _rs_t0 )); [ "$_rs_sec" -gt 0 ] || _rs_sec=1
+echo "📊 [takeover] oc rsync: $(grep -E 'Number of regular files transferred' /tmp/handoff-rsync-oc.log 2>/dev/null | tr '\n' ' ')"
+# 吞吐是「真实下线时长」的唯一未知量：每次交接都记下来，用于校准生产预期
+echo "📊 [takeover] oc 传输量 $(( _rs_bytes / 1048576 ))MB / ${_rs_sec}s = $(( _rs_bytes / 1048576 / _rs_sec ))MB/s"
 echo "📊 [takeover] zc rsync: $(grep -E 'total transferred file size|Number of regular files transferred' /tmp/handoff-rsync-zc.log 2>/dev/null | tr '\n' ' ')"
 [ "$_zc_rc" = "0" ] || abort_takeover "zcode 增量 rsync 失败 rc=$_zc_rc（$(tail -n 3 /tmp/handoff-rsync-zc.log 2>/dev/null | tr '\n' ' ')）"
 
