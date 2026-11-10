@@ -30,10 +30,6 @@ echo "ai 闸门等待 $(( $(date +%s) - GATE_T0 ))s 后放行"
 MODEL_READY=$(date +%s)
 [ "${STOP_EPOCH:-0}" -gt 0 ] && echo "📉 [model] 旧轮停机 → 模型通道恢复: $(( MODEL_READY - STOP_EPOCH ))s"
 
-echo "═══ [new] 归档循环闸门（真 gate.sh archives_done，仍需等整段归档）"
-bash "$HS/gate.sh" archives_done
-echo "archive 闸门放行（归档循环用，不影响服务可用性）"
-
 echo "═══ [new] 模拟各服务端口就绪（测试环境无真实服务，起假监听器代表全栈）"
 # 与生产 full-ready.sh 探测的端口集合一致；AI 侧端口在 ai 闸门之后才起，
 # 用来复现「聊天先好、AI 后好」的真实时序。
@@ -62,6 +58,10 @@ chk "主 state 库内容完整" "$(sqlite3 ~/.openclaw/state/openclaw.sqlite 'se
 chk "agent 库内容完整" "$(sqlite3 ~/.openclaw/agents/main/agent/openclaw.sqlite 'select x from a;' 2>/dev/null)" "42"
 chk "~/.zcode 增量同步" "$(cat ~/.zcode/cli/base.txt 2>/dev/null)" "zbase"
 chk "标记归属正确(serving)" "$(rclone cat "${HANDOFF_REMOTE_DIR}/new.json" 2>/dev/null | jq -r .state)" "serving"
+
+echo "═══ [new] 归档循环闸门（真 gate.sh archives_done，仍需等整段归档）"
+bash "$HS/gate.sh" archives_done
+echo "archive 闸门放行（归档循环用，不影响服务可用性）"
 
 echo "╔══════════════════════════════════════════════"
 echo "║ 继任者就位→rsync 完成: $((DONE_EPOCH - READY_EPOCH))s"
