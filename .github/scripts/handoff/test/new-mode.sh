@@ -26,12 +26,12 @@ echo "gate 等待 $(( $(date +%s) - GATE_T0 ))s 后放行"
 
 echo "═══ [new] 验收"
 fail=0
-chk() { if [ "$2" = "$3" ]; then echo "  ✅ $1"; else echo "  ❌ $1（期望=$2 实际=$3）"; fail=$((fail+1)); fi; }
+chk() { if [ "$2" = "$3" ]; then echo "  ✅ $1"; else echo "  ❌ $1（期望=$3 实际=$2）"; fail=$((fail+1)); fi; }
 chk "增量文件 last-minute.txt 已到达" "$(cat ~/.openclaw/workspace/last-minute.txt 2>/dev/null | grep -c 'written at')" "1"
 chk "活文件 live.log 已到达" "$([ -s ~/.openclaw/workspace/live.log ] && echo yes)" "yes"
 chk "--delete 生效（base.txt 已删）" "$([ -e ~/.openclaw/workspace/base.txt ] && echo 还在 || echo 已删)" "已删"
 chk "主 state 库内容完整" "$(sqlite3 ~/.openclaw/state/openclaw.sqlite 'select count(*) from t;' 2>/dev/null)" "2"
-chk "agent 库内容完整" "$(sqlite3 ~/.openclaw/agents/main/agent/openclaw.sqlite 'select a from a;' 2>/dev/null)" "42"
+chk "agent 库内容完整" "$(sqlite3 ~/.openclaw/agents/main/agent/openclaw.sqlite 'select x from a;' 2>/dev/null)" "42"
 chk "~/.zcode 增量同步" "$(cat ~/.zcode/cli/base.txt 2>/dev/null)" "zbase"
 chk "标记归属正确(serving)" "$(rclone cat "${HANDOFF_REMOTE_DIR}/new.json" 2>/dev/null | jq -r .state)" "serving"
 
