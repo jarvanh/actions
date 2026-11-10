@@ -630,6 +630,17 @@ cmd_ensure() {
 
   if svc "$name" is-active --quiet; then
     log "✅ $name 运行中 ($unit)"
+    # 2026-11-10：rclone 重启会换掉 /dropbox 的 fuse 连接，容器 bind 与早于挂载
+    # 启动的常驻服务仍握旧句柄（qoder 面板 401/429、workbuddy 快照停更）。
+    # 挂载刚起的宽限期由 dropbox_dependents.sh 内部跳过，避免与部署步骤抢容器。
+    if [ "$name" = rclone-dropbox ]; then
+      local deps
+      deps="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/dropbox_dependents.sh"
+      if [ -f "$deps" ]; then
+        log "检查 /dropbox 依赖方（容器 bind / 常驻服务）"
+        bash "$deps" heal || log "⚠️ 依赖方自愈未全部成功，见上"
+      fi
+    fi
   else
     case "$(svc_level "$name")" in
       system) log "❌ $name 启动失败，查看: sudo journalctl -u $unit" ;;

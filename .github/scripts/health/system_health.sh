@@ -47,6 +47,21 @@ fi
 st=$(systemctl --user is-active rclone-dropbox 2>/dev/null || true)
 if [ "$st" = active ]; then ok_notes+=("rclone=$st"); else fails+=("❌ rclone-dropbox: ${st:-unknown}"); fi
 
+# 2.5) /dropbox 依赖方（2026-11-10 qoder 失联事故）：rclone 重启后 fuse 连接换代，
+# 容器 bind（qoder2api /app/accounts、trae2api /app/data）与早于挂载启动的常驻服务
+# 会握旧句柄 —— qoder 面板读不到密码哈希 → 401→429，看板误报「数据源失联」。
+# 这里每 5 分钟体检一次，发现 stale 自动重建/重启，修不好才告警。
+DEPS="$HOME/.openclaw/bin/dropbox_dependents.sh"
+if [ -x "$DEPS" ]; then
+  if "$DEPS" check >/dev/null 2>&1; then
+    ok_notes+=("dropbox-deps=ok")
+  elif "$DEPS" heal >/dev/null 2>&1 && "$DEPS" check >/dev/null 2>&1; then
+    ok_notes+=("dropbox-deps=自动重建")
+  else
+    fails+=("❌ /dropbox 依赖方仍失效（容器 bind / 服务早于挂载）")
+  fi
+fi
+
 # 3) 已安装的 cftun-* 隧道 —— 先自愈一次再判定
 # 2026-11-10：平行会话跑 handoff 测试时 cutover.sh 会真的 stop 生产隧道（测试隔离缺陷），
 # 隧道被停后不会自己回来。这里先 start 一次，3 秒后复检，仍起不来才告警。

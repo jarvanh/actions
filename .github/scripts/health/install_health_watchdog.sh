@@ -17,6 +17,7 @@ ENV_FILE="$HOME/.openclaw/health-watchdog.env"
 install -d -m 755 "$BIN" "$UNIT_DIR"
 
 install -m 755 "$ROOT/.github/scripts/health/system_health.sh" "$BIN/system_health.sh"
+install -m 755 "$ROOT/.github/scripts/services/dropbox_dependents.sh" "$BIN/dropbox_dependents.sh"
 install -m 644 "$ROOT/.github/scripts/telegram/tg_notify.sh" "$BIN/tg_notify.sh"
 
 # 凭据：优先 alert 档（重要通知走 @SaberFuckBot），缺失时退回主 bot
