@@ -72,7 +72,10 @@ _reclaim_once() {
   local i t
   for i in $(seq 1 10); do
     t="$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
-    case "$t" in "${TMPN}.${SUFFIX}") return 0 ;; esac
+    # 2026-11-10 修复：临时名生效后必须继续走下面的 openclaw 改名。
+    # 原为 return 0，导致每轮只把名字改成临时名就返回，永远收不回 openclaw
+    # （现场 ts-reclaim.log 每 2 分钟重复「仍为 openclaw-tmp-…」即此症）。
+    case "$t" in "${TMPN}.${SUFFIX}") break ;; esac
     sleep 3
   done
   sudo tailscale set --ssh --hostname=openclaw --advertise-exit-node >/dev/null 2>&1 || true
