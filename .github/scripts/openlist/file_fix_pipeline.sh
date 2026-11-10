@@ -942,7 +942,23 @@ _sync_fix_missing_files() {
         dst_ls_ok=1
         echo "  复用调用方目标端清单（$(wc -l < "$dst_ls" | tr -d ' ') 项），跳过重复 lsf" | tee -a "$LOG_FILENAME"
       else
-        timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900s}" rclone lsf "$dest_path" -R --files-only > "$dst_ls" 2>/dev/null && dst_ls_ok=1 || true
+        local _dst_err
+        _dst_err=$(timeout "${OPENLIST_RCLONE_LISTING_TIMEOUT:-900s}" rclone lsf "$dest_path" -R --files-only 2>&1 > "$dst_ls") && dst_ls_ok=1 || true
+        # ★ 目标目录不存在 ≠ 列举失败（2026-11-10 修）:
+        #   目标目录压根没建出来时 `lsf` 必然非零 ⇒ 旧逻辑 dst_ls_ok=0 → 跳过 diff
+        #   → 缺失清单为空 → **修复管线根本不启动**。而这恰恰是"目录建不出来"
+        #   这个最该被修复的场景（生产实证 run 42514192753 的 306-308.jpg、
+        #   run 42540084233 的 Dark Blue 4 文件都是这个形态，只能靠正常轮的
+        #   `Failed to copy` 日志兜底才进得了修复；fix_test 模式跳过传输 ⇒ 空转，
+        #   run 42653945348 实证 `src=1, dst=0 跳过 lsf diff`）。
+        #   判据: 只有**明确**的"目录/对象不存在"才把源端清单当全量缺失 ——
+        #   网络抖动/超时等不确定失败仍保持旧的保守跳过（宁慢勿错）。
+        if [ "$dst_ls_ok" -ne 1 ] \
+           && printf '%s' "$_dst_err" | grep -qiE 'directory not found|object not found|not found'; then
+          echo "  目标目录不存在 → 源端清单视为全量缺失（$(printf '%s' "$_dst_err" | head -1 | cut -c1-110)）" | tee -a "$LOG_FILENAME"
+          dst_ls_ok=1
+          : > "$dst_ls"
+        fi
       fi
       if [ "$src_ls_ok" -eq 1 ] && [ "$dst_ls_ok" -eq 1 ]; then
         # 仅当两端列表都完整获取时才做 diff，避免半截列表产生误报触发无谓修复
