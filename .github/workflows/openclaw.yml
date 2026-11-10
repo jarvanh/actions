@@ -49,6 +49,11 @@ jobs:
       # 生产出过「Tailscale 改名卡 tmp」与「AI 直传版本错配」两个问题后加的闸：
       # 要停只需删掉这个仓库变量，不必回滚代码。
       OPENCLAW_HANDOFF: ${{ vars.OPENCLAW_HANDOFF }}
+      # 2026-11-10：AI 提前快照子开关（默认关）。实测：交出瞬间停 AI 栈再打包要
+      # ~8min，模型通道反而比「AI 栈保持在线到归档后」（~213s）更慢 —— 这是回归。
+      # 默认关 = AI 栈照旧在线，继任者等 archives_done 起模型（基线时序）；
+      # 设 1 = 启用交出瞬间快照（仅在确认快照足够快时才开）。
+      OPENCLAW_AI_EARLY: ${{ vars.OPENCLAW_AI_EARLY }}
       TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
       TS_OAUTH_CLIENT_SECRET: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
       # Tailscale API access token（tskey-api-*）：具备 devices 读写权限，用于
@@ -2128,8 +2133,10 @@ jobs:
         run: |
           set -uo pipefail
           OC_DIR="${GITHUB_WORKSPACE}/.github/scripts/openclaw"
-          # Phase 1.5：只等 AI 栈自己的快照（交出瞬间上传），不必等整段最终归档
-          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/gate.sh" ai_archives_done || true
+          # AI 侧闸门：默认等 archives_done（AI 栈在线到归档后，基线时序 ~213s）；
+          # OPENCLAW_AI_EARLY=1 时才改为等交出瞬间快照（实测更慢，故默认关）。
+          _gate=archives_done; [ "${OPENCLAW_AI_EARLY:-}" = "1" ] && _gate=ai_archives_done
+          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/gate.sh" "$_gate" || true
           # 派发六上游（run-*.sh 调用即返回，真实部署在脚本内后台子壳；与 early-dispatch 同款）
           _dispatched=0
           for _u in workbuddy trae2api zcode2api qingyan qoder2api autoclaw; do
@@ -2250,9 +2257,9 @@ jobs:
           # 2026-11-06 启动提速（主人拍板）：健康后收尾并行化 ——
           # 本步整体后台起跑（rc/log/pid 契约），由「Start background archive loop」前的
           # 「Collect background post-health tasks」统一收口；脚本体零改动。
-          # 2026-11-10 Phase 1.5：等 AI 栈快照（含 rsstt.tar.gz，交出瞬间上传）即可，
-          # 不必等整段最终归档 —— 仍是「旧轮停机后」的静树，零丢失不变；serve 轮直通。
-          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/gate.sh" ai_archives_done || true
+          # rsstt 数据同受 AI 子开关控制（默认等最终归档，零丢失口径不变）
+          _gate=archives_done; [ "${OPENCLAW_AI_EARLY:-}" = "1" ] && _gate=ai_archives_done
+          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/gate.sh" "$_gate" || true
           _bg_tag="rss"
           rm -f "/tmp/post-health-${_bg_tag}.rc" "/tmp/post-health-${_bg_tag}.log" "/tmp/post-health-${_bg_tag}.pid"
           (
@@ -2415,8 +2422,9 @@ jobs:
           # 2026-11-06 启动提速（主人拍板）：健康后收尾并行化 ——
           # 本步整体后台起跑（rc/log/pid 契约），由「Start background archive loop」前的
           # 「Collect background post-health tasks」统一收口；脚本体零改动。
-          # 2026-11-10 Phase 1.5：看板读网关数据，等 AI 栈快照即可；serve 轮直通。
-          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/gate.sh" ai_archives_done || true
+          # 看板读网关数据，同样按 AI 子开关选闸门
+          _gate=archives_done; [ "${OPENCLAW_AI_EARLY:-}" = "1" ] && _gate=ai_archives_done
+          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/gate.sh" "$_gate" || true
           _bg_tag="quota"
           rm -f "/tmp/post-health-${_bg_tag}.rc" "/tmp/post-health-${_bg_tag}.log" "/tmp/post-health-${_bg_tag}.pid"
           (

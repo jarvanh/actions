@@ -151,7 +151,9 @@ echo "✅ [cutover] rsync 源就绪（${TS_IP}:${HANDOFF_RSYNC_PORT}，只读，
 # ── 3.5 Phase 1.5：后台快照 AI 栈（停服+归档+上传），与继任者 rsync 并行 ──
 # 必须在 handing_over **之后**才可能被继任者消费，但启动可以提前：越早开跑，
 # 模型通道越早恢复。失败不影响交出本身（继任者 gate 超时降级）。
-if [ -f "$GITHUB_WORKSPACE/.github/scripts/handoff/ai-archives.sh" ]; then
+# 2026-11-10：默认**不**在交出瞬间停 AI 栈 —— 实测快照要 ~8min，比「AI 栈在线到
+# 归档后、继任者等 archives_done」（~213s）更慢。只有 OPENCLAW_AI_EARLY=1 才启用。
+if [ "${OPENCLAW_AI_EARLY:-}" = "1" ] && [ -f "$GITHUB_WORKSPACE/.github/scripts/handoff/ai-archives.sh" ]; then
   setsid nohup bash "$GITHUB_WORKSPACE/.github/scripts/handoff/ai-archives.sh" \
     >>/tmp/handoff-ai-archives.log 2>&1 < /dev/null &
   disown 2>/dev/null || true
