@@ -101,6 +101,27 @@ _run_registry_entry() {
 #     回传 0 B、合计低估一半）。
 OPENLIST_PAIR_PARALLEL="${OPENLIST_PAIR_PARALLEL:-2}"   # 1=串行；>=2=按后端分组并行
 
+# ===== 单同步对的公平份额（2026-11-10 加）=====
+# 病灶（run 42706236473 实证，sync step 全程 322min）: 21 个同步对里只启动了 2 个，
+#   两者各自卡在**停滞的传输**上（471.476 MiB 的流跑了 56min；12.323 GiB 的流 26min
+#   只推进 17 MiB；全轮 29% 的进度样本是 0 B/s），双双吃满预算被硬顶放弃 ⇒
+#   「本轮 0 个完成」、游标只前进 1 位。按每轮 2 个对推算，轮转一圈约 11 轮 ≈ 3 天
+#   —— 这才是"同步完不成"的根因（**不是**修复重试: 该轮修复只占 7 次进入 /
+#   22 次方法尝试 ≈ 20-30min，我最初归因到这里是错的，以日志为准更正）。
+# 方案: 分发时给每个对算一份**公平份额** = 剩余可用预算 / 尚需服务的对数，
+#   下限 OPENLIST_PAIR_MIN_SLICE_SECONDS（默认 20min: 够跑完预览差值再实传一段），
+#   上限 = 剩余可用预算，并夹到平台硬顶之前。份额到期后:
+#     · sync_budget_stop 返回真 ⇒ 该对不再开新批次/子目录，收敛后正常退出交棒
+#     · _budget_slice_seconds 被夹到份额终点 ⇒ 在途单元到点被 timeout 截断
+#       （rc=124 已按"部分成功"处理，不算失败，未传部分下轮接力）
+#   ⇒ 一轮内所有对都能被服务到，慢对不再独占整轮；**不新增失败语义**，只是把
+#     "吃满 5h 后被硬杀"换成"到点主动交棒"，两者对下游都是 partial。
+# 为什么必须走环境变量: worker 是 `( ... ) &` 子 shell，其中函数又多被 `$( )` /
+#   管道包一层 —— 全局变量在更深的子 shell 里读不到（同 OPENLIST_SYNC_DEADLINE_EPOCH，
+#   参见 openlist_api.sh 里"短路标记必须落文件"的实测注释）。
+# 未注入预算锚点（调试/还原/本机单测）→ 不设份额，行为与改动前完全一致。
+OPENLIST_PAIR_MIN_SLICE_SECONDS="${OPENLIST_PAIR_MIN_SLICE_SECONDS:-1200}"  # 20min
+
 # 收割一个完成的同步对 worker（阻塞轮询；结果文件为准 + kill -0 兜底，
 # 与 _sync_par_reap_one 同策略: wait -n -p 对被杀子进程不回填 pid）
 _pairs_parallel_reap_one() {
@@ -159,6 +180,9 @@ _pairs_parallel_reap_one() {
         total_transferred=$((total_transferred + _tr))
         case "$_st" in
           failed|partial) _failed_n=$((_failed_n + 1)) ;;
+          # 份额/预算到点主动交棒的（2026-11-10 加）: 单列，既不冒充完成也不计入
+          #   失败，避免"到点交棒"被读成后端故障。
+          truncated) _trunc_n=$((_trunc_n + 1)) ;;
         esac
         echo "✅ 并行同步对完成: 第 $((_idx + 1))/${_pp_n} 个（后端 ${_be:-?} · ${_st:-?} · $(format_bytes "$_tr")）"
         return 0
@@ -189,7 +213,7 @@ _run_registry_pairs_parallel() {
   declare -A _pp_pid=() _pp_be=() _pp_dst=() _busy_be=() _started=()
   # 这几个是"调用方局部": _pairs_parallel_reap_one 靠 bash 动态作用域改它们，
   # 因此既不能声明在 reap 内部（改了看不见），也不能不声明（会污染全局）
-  local _pp_n="$n" _done_n=0 _failed_n=0 total_transferred=0
+  local _pp_n="$n" _done_n=0 _failed_n=0 _trunc_n=0 total_transferred=0
   local _k idx _e _dst _be _pick _pick_be _running=0
   echo "🔀 并行同步对: 上限 ${_par} 个（同一后端不并行），本轮候选 ${n} 个"
   while :; do
@@ -234,19 +258,34 @@ _run_registry_pairs_parallel() {
       idx=$_pick
       _e="${SYNC_TASK_REGISTRY[$idx]}"
       IFS='|' read -r _ _ _dst _ _ <<< "$_e"
-      echo "=== 同步对(并行) ${_pick_be} · 第 $((idx + 1))/${n} 个 ==="
+      # 公平份额（2026-11-10 加，见 OPENLIST_PAIR_MIN_SLICE_SECONDS 处注释）:
+      #   本对 + 在跑 + 尚未启动 = 还需要服务的对数，用它去分剩余可用预算。
+      local _need=1 _k2 _unstarted=0 _share="" _pd_epoch=""
+      for ((_k2 = 0; _k2 < n; _k2++)); do
+        [ -z "${_started[$_k2]:-}" ] && _unstarted=$((_unstarted + 1))
+      done
+      _need=$(( 1 + _running + _unstarted ))
+      _share=$(_pair_share_seconds "$_need")
+      if [[ "$_share" =~ ^[0-9]+$ ]] && [ "$_share" -gt 0 ]; then
+        _pd_epoch=$(( $(date +%s) + _share ))
+        # 不得越过平台硬顶（保留收尾预留，与 sync_hard_limit_stop 同口径）
+        if [[ "${OPENLIST_STEP_HARD_LIMIT_EPOCH:-}" =~ ^[0-9]+$ ]]; then
+          local _hl=$(( OPENLIST_STEP_HARD_LIMIT_EPOCH - ${OPENLIST_STEP_TAIL_RESERVE_SECONDS:-480} ))
+          [ "$_pd_epoch" -gt "$_hl" ] && _pd_epoch="$_hl"
+        fi
+        echo "=== 同步对(并行) ${_pick_be} · 第 $((idx + 1))/${n} 个 · 份额 $((_share / 60))min（需服务 ${_need} 个）==="
+      else
+        echo "=== 同步对(并行) ${_pick_be} · 第 $((idx + 1))/${n} 个 ==="
+      fi
       (
+        export OPENLIST_PAIR_DEADLINE_EPOCH="$_pd_epoch"
         PROGRESS_WORKER_MUTE=1
         _rot_attempts=0
         SYNC_BACKEND_DEAD=0
         SYNC_BACKEND_DEAD_STRONG=0
         SYNC_FAILED_BATCH=0
         _run_registry_entry "$_e" || true
-        _st=""
-        if [ "${SYNC_SKIPPED:-0}" = "1" ]; then _st="skipped"
-        elif [ "${SYNC_FAILED:-0}" = "0" ]; then _st="synced"
-        elif [ "${SYNC_PARTIAL:-0}" = "1" ]; then _st="partial"
-        else _st="failed"; fi
+        _st=$(_pair_status_from_flags)
         {
           printf 'status=%s\n' "$_st"
           printf 'transferred=%s\n' "${SYNC_TRANSFERRED_BYTES:-0}"
@@ -313,7 +352,14 @@ _run_registry_pairs_parallel() {
       echo "⚠️ 硬顶放弃在途同步对 ${_pp_abandoned} 个（未完成，留待下个循环重试）"
       echo "   在途已结算 $(format_bytes "$_pp_settled")（来自实时记账文件，与心跳同源；不作为本轮完成量）"
     fi
-    echo "并行同步对完成: 本轮 ${_done_n} 个（失败 ${_failed_n}）· 传输 $(format_bytes "$total_transferred") · 下轮游标 → 第 $((_resume + 1))/${n} 个"
+    local _trunc_note=""
+    [ "${_trunc_n:-0}" -gt 0 ] && _trunc_note=" · 到点交棒 ${_trunc_n}"
+    echo "并行同步对完成: 本轮 ${_done_n} 个（失败 ${_failed_n}${_trunc_note}）· 传输 $(format_bytes "$total_transferred") · 下轮游标 → 第 $((_resume + 1))/${n} 个"
+    # 到点交棒（2026-11-10）: 有 truncated 就必须说清"没跑完但没失败"，否则
+    #   「本轮 N 个（失败 0）」会被读成全部同步完成 —— 与硬顶放弃同源的误读。
+    if [ "${_trunc_n:-0}" -gt 0 ]; then
+      echo "   ↳ 其中 ${_trunc_n} 个是份额到点主动交棒（未完，子 marker/游标已持久化，下轮接力；非后端故障）"
+    fi
   fi
   return 0
 }
@@ -460,9 +506,41 @@ _rotation_save() {
 # 预算未设置（调试/还原模式）→ 永不触发停止。
 OPENLIST_SYNC_BUDGET_SECONDS="${OPENLIST_SYNC_BUDGET_SECONDS:-19200}"      # 320min
 OPENLIST_SYNC_MIN_SLICE_SECONDS="${OPENLIST_SYNC_MIN_SLICE_SECONDS:-600}"  # 10min
+# ===== 生效预算终点（2026-11-10 加）=====
+# 语义: min(全局预算锚点 OPENLIST_SYNC_DEADLINE_EPOCH, 本同步对份额终点
+#   OPENLIST_PAIR_DEADLINE_EPOCH)，两者都无则输出空串（调用方据此不干预）。
+# 为什么必须合并: 份额只在并行 worker 子 shell 里存在，而"批次闸/子目录闸/修复
+#   管线闸"原先都**直接比较全局锚点**（不走 sync_budget_stop）。不合并的话，
+#   份额到点的对会在修复管线里继续跑 —— run 42706236473 的修复正发生在
+#   04:00-04:11，那早已越过任何合理的单对份额 ⇒ 份额形同虚设，慢对依旧独占整轮。
+# 输出: 数字（epoch）或空串。无副作用，可安全地在 `$( )` 里调用。
+budget_deadline_epoch() {
+  local _d="${OPENLIST_SYNC_DEADLINE_EPOCH:-}" _p="${OPENLIST_PAIR_DEADLINE_EPOCH:-}"
+  [[ "$_d" =~ ^[0-9]+$ ]] || _d=""
+  [[ "$_p" =~ ^[0-9]+$ ]] || _p=""
+  if [ -z "$_d" ]; then echo "${_p:-}"; return 0; fi
+  if [ -z "$_p" ]; then echo "$_d"; return 0; fi
+  if [ "$_p" -lt "$_d" ]; then echo "$_p"; else echo "$_d"; fi
+}
+
+# 本同步对份额是否为**当前生效**的约束（存在且比全局锚点更近）。
+# 用途: 门限的"预留量"必须与尺度匹配 —— 全局锚点配 2h 批次片长 / 25% 修复预留，
+#   而份额只有 ~20min，套用全局尺度会恒真（连一个批次/子目录都开不起来 ⇒ 同步
+#   彻底停死）。故份额生效时各闸一律退到"全局最小片"(默认 600s) 当预留。
+_pair_share_binding() {
+  local _d="${OPENLIST_SYNC_DEADLINE_EPOCH:-}" _p="${OPENLIST_PAIR_DEADLINE_EPOCH:-}"
+  [[ "$_p" =~ ^[0-9]+$ ]] || return 1
+  [[ "$_d" =~ ^[0-9]+$ ]] || return 0
+  [ "$_p" -lt "$_d" ]
+}
+
 sync_budget_stop() {
-  [ -n "${OPENLIST_SYNC_DEADLINE_EPOCH:-}" ] || return 1
-  [ $(( $(date +%s) + OPENLIST_SYNC_MIN_SLICE_SECONDS )) -ge "$OPENLIST_SYNC_DEADLINE_EPOCH" ]
+  # 生效终点已合并"单对份额"（见 budget_deadline_epoch）: 份额到期与全局预算
+  # 耗尽同义 —— 本对不再开新的批次/子目录/修复，把手上的单元收敛后退出交棒。
+  local _dl
+  _dl=$(budget_deadline_epoch)
+  [ -n "$_dl" ] || return 1
+  [ $(( $(date +%s) + OPENLIST_SYNC_MIN_SLICE_SECONDS )) -ge "$_dl" ]
 }
 
 # ===== 平台硬顶闸（2026-09-23 病灶 D）=====
@@ -502,10 +580,17 @@ _repair_reserve_seconds() {
   echo "$r"
 }
 _subdir_budget_stop() {
-  [ -n "${OPENLIST_SYNC_DEADLINE_EPOCH:-}" ] || return 1
-  local r
-  r=$(_repair_reserve_seconds)
-  [ $(( $(date +%s) + r )) -ge "$OPENLIST_SYNC_DEADLINE_EPOCH" ]
+  local _dl r
+  _dl=$(budget_deadline_epoch)
+  [ -n "$_dl" ] || return 1
+  if _pair_share_binding; then
+    # 份额内: 尾部保护由份额本身承担，只需留够"一个最小片"给本子目录收尾；
+    #   若仍用 25% 全局修复预留（默认 4800s），20min 份额下本闸恒真 ⇒ 一个子目录都开不起来。
+    r="${OPENLIST_SYNC_MIN_SLICE_SECONDS:-600}"
+  else
+    r=$(_repair_reserve_seconds)
+  fi
+  [ $(( $(date +%s) + r )) -ge "$_dl" ]
 }
 
 # 预算派生阈值：按预算**成比例缩放**（2026-09-15 加，支持"短轮快速迭代"）
@@ -548,8 +633,18 @@ _batch_slice_effective() {
   _budget_scaled 3 8 7200 900
 }
 _batch_budget_stop() {
-  [ -n "${OPENLIST_SYNC_DEADLINE_EPOCH:-}" ] || return 1
-  [ $(( $(date +%s) + $(_batch_slice_effective) )) -ge "$OPENLIST_SYNC_DEADLINE_EPOCH" ]
+  local _dl r
+  _dl=$(budget_deadline_epoch)
+  [ -n "$_dl" ] || return 1
+  if _pair_share_binding; then
+    # 份额生效: 不再要求"够一个完整批次片长"(默认 2h)，否则 20min 份额恒真、
+    #   批次路径完全不启动；退到最小片即可 —— 批次内是逐文件传，到点被
+    #   timeout 截断属部分成功（rc=124），未传部分下轮接力。
+    r="${OPENLIST_SYNC_MIN_SLICE_SECONDS:-600}"
+  else
+    r=$(_batch_slice_effective)
+  fi
+  [ $(( $(date +%s) + r )) -ge "$_dl" ]
 }
 
 # 单次传输可用的秒数 = 预算剩余 − 尾部预留；无预算（调试/还原）时输出空串
@@ -565,6 +660,17 @@ _budget_slice_seconds() {
   [ -n "${OPENLIST_SYNC_DEADLINE_EPOCH:-}" ] || { echo ""; return 0; }
   local secs=$(( OPENLIST_SYNC_DEADLINE_EPOCH - $(date +%s) - reserve ))
   [ "$secs" -lt 60 ] && secs=60
+  # 单同步对公平份额终点（2026-11-10 加）: 在途单元也不得跨过本对的份额终点，
+  #   否则"分到 13min 份额"形同虚设 —— 一个 471MiB / 24KiB/s 的流照样能跑 56min
+  #   （run 42706236473 实测），份额就被单文件吃穿了。夹到终点后，rclone 被
+  #   timeout 截断 → rc=124 → 既有逻辑按"部分成功"处理（不算失败、不算封顶），
+  #   未传部分由巩固/下轮接力。仅在 worker 子 shell 中有该变量，串行路径不变。
+  local _pd="${OPENLIST_PAIR_DEADLINE_EPOCH:-}"
+  if [[ "$_pd" =~ ^[0-9]+$ ]]; then
+    local _left=$(( _pd - $(date +%s) ))
+    [ "$_left" -lt 60 ] && _left=60
+    [ "$_left" -lt "$secs" ] && secs="$_left"
+  fi
   echo "$secs"
 }
 
@@ -589,6 +695,45 @@ _slice_cap_seconds() {
     tmo="$cap"
   fi
   echo "$tmo"
+}
+
+# ===== 单同步对的公平份额（2026-11-10 加，动因见 OPENLIST_PAIR_MIN_SLICE_SECONDS）=====
+# 语义: min(剩余可用预算, max(下限, 剩余可用预算 / 尚需服务对数))
+#   剩余可用预算 = _budget_slice_seconds（已扣尾部预留）；未注入预算锚点 → 输出空
+#   （调用方据此不加份额约束，调试/还原/本机行为不变）。
+# 为什么下限还要再取 min: 轮末剩余预算可能已小于下限 —— 此时按预算给，
+#   绝不能因为"下限 20min"凭空造出比剩余预算还长的份额（会越过硬顶）。
+# 用法: secs=$(_pair_share_seconds <尚需服务对数>)
+_pair_share_seconds() {
+  local _need="${1:-1}"
+  { [[ "$_need" =~ ^[0-9]+$ ]] && [ "$_need" -gt 0 ]; } || _need=1
+  local _usable
+  _usable=$(_budget_slice_seconds)
+  { [[ "$_usable" =~ ^[0-9]+$ ]] && [ "$_usable" -gt 0 ]; } || { echo ""; return 0; }
+  local _min="${OPENLIST_PAIR_MIN_SLICE_SECONDS:-1200}"
+  [[ "$_min" =~ ^[0-9]+$ ]] || _min=1200
+  local _share=$(( _usable / _need ))
+  [ "$_share" -lt "$_min" ] && _share="$_min"
+  [ "$_share" -gt "$_usable" ] && _share="$_usable"
+  echo "$_share"
+}
+
+# ===== 并行同步对的收尾状态（2026-11-10 抽函数）=====
+# 优先级: skipped > failed/partial > truncated > synced
+# 为什么要有 truncated 这一档: 旧版只按 SYNC_FAILED=0 就判 synced，于是**份额/预算
+#   到点主动交棒**（未跑完）的对在日志里会被记成"完成"，而同一轮收尾又说
+#   「硬顶放弃在途同步对 N 个」—— 自相矛盾，正是 d50dda9 修掉的那类缺陷。
+#   语义与 _sync_task_finalize 对齐: SYNC_TIME_EXHAUSTED=1 时不写成功 marker，
+#   所以状态也必须不是 synced。单列而不并入 failed: 到点交棒不是后端故障。
+# 依赖调用方 worker 子 shell 里的 SYNC_* 标志（bash 动态作用域）。
+_pair_status_from_flags() {
+  if [ "${SYNC_SKIPPED:-0}" = "1" ]; then echo skipped; return 0; fi
+  if [ "${SYNC_FAILED:-0}" != "0" ]; then
+    if [ "${SYNC_PARTIAL:-0}" = "1" ]; then echo partial; else echo failed; fi
+    return 0
+  fi
+  if [ "${SYNC_TIME_EXHAUSTED:-0}" = "1" ]; then echo truncated; return 0; fi
+  echo synced
 }
 
 # ===== F22 写探针周期性重探 =====

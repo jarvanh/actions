@@ -2,17 +2,23 @@
 # _get_openlist_token 动态账密登录单元测试（PATH-stub curl 隔离网络）
 # 覆盖契约:
 #   T1 成功登录 → stdout 输出 data.token，rc=0
-#   T2 密码错误（code≠200 且无 token）→ 重试一次后 rc≠0，stderr 提示检查
-#      OPENLIST_ADMIN_PASSWORD，且不回显服务端 message
+#   T2 密码错误（code≠200 且无 token）→ **立即** fail fast（不重试），stderr 提示
+#      检查 OPENLIST_ADMIN_PASSWORD，且不回显服务端 message
+#      （2026-11-09 改: 有响应但拿不到 token = 账密不一致，等再久也没用）
 #   T3 未设置 OPENLIST_ADMIN_PASSWORD → rc≠0 快速失败
 #   T4 密码含引号/反斜杠/美元符 → jq 构造体往返无损（假服务端按字段校验）
-#   T5 服务端无响应（curl 失败）→ 重试两次后 rc≠0
+#   T5 服务端**无响应**（curl 失败）→ 等满窗口后 rc≠0（窗口内多次尝试）
+#   T5b 窗口耗尽后再调用 → 短路快速失败，**一次 curl 都不发**
+#      （管理面真挂时，热路径上几十次调用会累积成数十分钟纯等待）
 #   T6 用户名默认 admin，OPENLIST_ADMIN_USER 可覆盖
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 cd "$WORK_DIR"
+# 短路标记必须隔离到本测试目录: 真源默认写 /tmp/ol_login_down_until，而 T5 会把它
+#   置成"一段时间内不可用" ⇒ 不清掉会让后续 T6 被上一场景短路掉（实测 rc=1）。
+export OL_LOGIN_DOWN_FILE="$WORK_DIR/login_down_until"
 
 PASS=0
 FAIL=0
@@ -106,12 +112,14 @@ SCENARIO=success run_tok
 chk "T1 rc=0" "$TOKEN_RC" "0"
 chk "T1 输出 token" "$TOKEN_OUT" "JWT_FAKE_OK"
 
-# ---------- T2 密码错误: 重试 2 次、rc=1、提示含变量名且不回显 message ----------
+# ---------- T2 密码错误: **不重试**（fail fast）、rc=1、提示含变量名且不回显 message ----------
+# 旧断言是"重试两次": 那时无响应与被拒都走同一条重试路径。2026-11-09 起被拒必须
+# fail fast —— 账密不一致不会因为多等 3 秒变对，而每轮热路径要调几十次。
 reset_log
 SCENARIO=wrongpass run_tok
 chk "T2 rc=1" "$TOKEN_RC" "1"
 chk "T2 输出为空" "$TOKEN_OUT" ""
-chk "T2 重试两次" "$(wc -l < "$CALL_LOG" | tr -d ' ')" "2"
+chk "T2 被拒不重试（1 次即止）" "$(wc -l < "$CALL_LOG" | tr -d ' ')" "1"
 ok_or "$(has_substr OPENLIST_ADMIN_PASSWORD "$ERR_OUT" && echo yes)" "T2 stderr 指明变量名"
 if has_substr incorrect "$ERR_OUT"; then
   chk "T2 不回显服务端 message" fail ok
@@ -137,13 +145,23 @@ SCENARIO=success FAKE_PASSWORD="$SPECIAL_PASS" OPENLIST_ADMIN_PASSWORD="$SPECIAL
 chk "T4 特殊字符密码仍登录成功" "$TOKEN_RC" "0"
 chk "T4 token 正常返回" "$TOKEN_OUT" "JWT_FAKE_OK"
 
-# ---------- T5 服务端无响应重试两次 ----------
+# ---------- T5 服务端无响应: 窗口内多次尝试，窗口耗尽后 rc=1 ----------
+# 把等待窗压到 6s（真源: ticks = 窗口/3，最少 2）⇒ 2 次尝试，测试不必真等 120s。
 reset_log
-SCENARIO=noresp run_tok
+SCENARIO=noresp OPENLIST_LOGIN_WAIT_SECONDS=6 run_tok
 chk "T5 rc=1" "$TOKEN_RC" "1"
-chk "T5 尝试两次" "$(wc -l < "$CALL_LOG" | tr -d ' ')" "2"
+chk "T5 窗口内尝试 2 次" "$(wc -l < "$CALL_LOG" | tr -d ' ')" "2"
+ok_or "$(has_substr 无响应 "$ERR_OUT" && echo yes)" "T5 stderr 说明是无响应（区别于被拒）"
 
-# ---------- T6 用户名覆盖 ----------
+# ---------- T5b 窗口耗尽后: 短路快速失败，且一次 curl 都不发 ----------
+reset_log
+SCENARIO=noresp OPENLIST_LOGIN_WAIT_SECONDS=6 run_tok
+chk "T5b 短路仍 rc=1" "$TOKEN_RC" "1"
+chk "T5b 短路期间 0 次 curl（不重复付等待）" "$(wc -l < "$CALL_LOG" | tr -d ' ')" "0"
+ok_or "$(has_substr 短路 "$ERR_OUT" && echo yes)" "T5b stderr 明示短路中"
+
+# ---------- T6 用户名覆盖（先清短路标记，否则会继承 T5 的窗口） ----------
+rm -f "$OL_LOGIN_DOWN_FILE"
 reset_log
 SCENARIO=success FAKE_USERNAME=root OPENLIST_ADMIN_USER=root run_tok
 chk "T6 OPENLIST_ADMIN_USER 生效 rc=0" "$TOKEN_RC" "0"

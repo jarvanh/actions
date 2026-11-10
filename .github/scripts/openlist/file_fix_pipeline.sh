@@ -713,8 +713,18 @@ _sync_bulk_hash_dir_fold() {
     # 时间预算: 剩余不足一个工作片就停 —— 用 slice 语义而非"已过期才停"。
     # 单个目录的 rclone sync 可能跑很久，等到过期再收摊会把后面持久化复核
     # 与收尾的时间一起吃掉（逐文件循环已改用同一口径，见下方 _fix_slice）
-    if [ -n "${OPENLIST_SYNC_DEADLINE_EPOCH:-}" ] \
-       && [ $(( $(date +%s) + _fold_slice )) -ge "$OPENLIST_SYNC_DEADLINE_EPOCH" ]; then
+    # 终点改走 budget_deadline_epoch（2026-11-10）: 并行模式下还必须受"本同步对
+    #   份额"约束 —— 否则份额到点的对会继续折叠/修复几十分钟~几小时
+    #   （run 42706236473 的修复正发生在 04:00-04:11，早已越过任何合理份额 ⇒
+    #   份额形同虚设）。本文件可被单测单独 source，故带 declare -F 兜底。
+    local _fold_dl=""
+    if declare -F budget_deadline_epoch >/dev/null 2>&1; then
+      _fold_dl=$(budget_deadline_epoch)
+    else
+      _fold_dl="${OPENLIST_SYNC_DEADLINE_EPOCH:-}"
+    fi
+    if [ -n "$_fold_dl" ] \
+       && [ $(( $(date +%s) + _fold_slice )) -ge "$_fold_dl" ]; then
       echo "⏰ 折叠预算将尽，停止（剩余目录交下轮，尾部时间留给持久化复核）" | tee -a "$LOG_FILENAME"
       break
     fi
@@ -1174,8 +1184,17 @@ _sync_fix_missing_files() {
         # 在途 marker 与 fix_list 全丢（run 34674196629 就是被超时收掉的）。
         # 有了这道闸，上限才可以放心调大: 到点停在下个文件前，状态已增量持久化。
         # 预算未设置（调试/还原模式）→ 永不触发，行为与旧版一致。
-        if [ -n "${OPENLIST_SYNC_DEADLINE_EPOCH:-}" ] \
-           && [ $(( $(date +%s) + _fix_slice )) -ge "$OPENLIST_SYNC_DEADLINE_EPOCH" ]; then
+        # 终点走 budget_deadline_epoch（2026-11-10）: 并行模式下还要受"本同步对
+        #   份额"约束，否则份额到点的对会在修复管线里继续跑几十分钟~几小时
+        #   （run 42706236473 的修复正发生在 04:00-04:11，早已越过任何合理份额）。
+        local _fix_dl=""
+        if declare -F budget_deadline_epoch >/dev/null 2>&1; then
+          _fix_dl=$(budget_deadline_epoch)
+        else
+          _fix_dl="${OPENLIST_SYNC_DEADLINE_EPOCH:-}"
+        fi
+        if [ -n "$_fix_dl" ] \
+           && [ $(( $(date +%s) + _fix_slice )) -ge "$_fix_dl" ]; then
           echo "⏳ 修复管线预算将尽，优雅收摊: 剩余 $((_cb_total - _cb_done)) 个文件交下轮接力（状态已增量持久化）" | tee -a "$LOG_FILENAME"
           SYNC_TIME_EXHAUSTED=1
           break

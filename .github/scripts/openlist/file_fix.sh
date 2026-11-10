@@ -1380,12 +1380,21 @@ _fix_switch_to_hash_dir() {
     [[ "$_409_sleep" =~ ^[0-9]+$ ]] || _409_sleep=300
     # 同一目录本轮只付一次等待: 40+ 个文件共用同一 hash 目录，若每个都等 15min
     # 会直接烧光整轮预算（本目录实证有 44 个待修文件）。用目录键去重。
+    # 生效预算终点（2026-11-10）: 并行模式下还要受"本同步对份额"约束 ——
+    #   409 退避一窗就是 ${_409_sleep}s 量级，份额到点还在等纯属浪费。
+    #   本文件可被单测单独 source，故带 declare -F 兜底。
+    local _409_dl=""
+    if declare -F budget_deadline_epoch >/dev/null 2>&1; then
+      _409_dl=$(budget_deadline_epoch)
+    else
+      _409_dl="${OPENLIST_SYNC_DEADLINE_EPOCH:-}"
+    fi
     if [ "${_FIX_HASHDIR_409_TRIED[$hash_dst_dir]:-0}" = "1" ]; then
       log_fix "$fix_log" "   ⏭ 该目录本轮已做过 409 退避重试，本次不再等待（结果已定）"
     # 预算不足则放弃等待（不把整轮预算烧在一个目录上；下轮接力）
     elif declare -F sync_hard_limit_stop >/dev/null 2>&1 \
-       && [ -n "${OPENLIST_SYNC_DEADLINE_EPOCH:-}" ] \
-       && [ $(( $(date +%s) + _409_sleep + 120 )) -ge "$OPENLIST_SYNC_DEADLINE_EPOCH" ]; then
+       && [ -n "$_409_dl" ] \
+       && [ $(( $(date +%s) + _409_sleep + 120 )) -ge "$_409_dl" ]; then
       log_fix "$fix_log" "   ⏰ 预算不足一个 409 退避窗（${_409_sleep}s），跳过等待重试（交下轮接力）"
       _FIX_HASHDIR_409_TRIED["$hash_dst_dir"]=1
     else
