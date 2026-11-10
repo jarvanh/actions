@@ -34,6 +34,19 @@ echo "═══ [new] 归档循环闸门（真 gate.sh archives_done，仍需等
 bash "$HS/gate.sh" archives_done
 echo "archive 闸门放行（归档循环用，不影响服务可用性）"
 
+echo "═══ [new] 模拟各服务端口就绪（测试环境无真实服务，起假监听器代表全栈）"
+# 与生产 full-ready.sh 探测的端口集合一致；AI 侧端口在 ai 闸门之后才起，
+# 用来复现「聊天先好、AI 后好」的真实时序。
+_start_listener() { ( python3 -c "
+import socket,sys,time
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+s.bind(('127.0.0.1',int(sys.argv[1]))); s.listen(16)
+while True: time.sleep(3600)
+" "$1" >/dev/null 2>&1 & ) ; }
+for p in 18789 8318 8319 8320 8322 8790 8321; do _start_listener "$p"; done
+_start_listener 20128   # OmniRoute 数据已就绪（ai 闸门已放行）
+sleep 3
+
 echo "═══ [new] 整体上线（所有服务端口就绪才算——主人口径）"
 bash "$HS/full-ready.sh" 120 || echo "::warning::测试环境只有部分端口，按可得端口计"
 FULL_READY=$(date +%s)

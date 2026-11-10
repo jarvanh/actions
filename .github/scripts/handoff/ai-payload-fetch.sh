@@ -20,7 +20,10 @@ OLD_TS_IP="${1:-}"
 AI_PAYLOAD_DIR=/tmp/handoff-ai-payload
 PF_DIR=/tmp/openclaw-prefetch
 mkdir -p "$AI_PAYLOAD_DIR" "$PF_DIR"
+# 日志同时落盘与回流：setsid 子进程默认不进 step 日志，排障时会「看起来什么都没发生」。
+# 用 tee 写一份 /tmp，并经由调用方给的 FIFO/文件回流（见 takeover.sh 的重定向）。
 exec >>/tmp/handoff-ai-fetch.log 2>&1
+echo "[$(date '+%F %T')] ai-fetch pid=$$ src=${1:-?}"
 echo "[$(date '+%F %T')] ai-fetch start (src ${OLD_TS_IP}:${HANDOFF_RSYNC_PORT})"
 
 for _i in $(seq 1 36); do   # 最多 180s：旧轮要先停 AI 栈再打包上传
