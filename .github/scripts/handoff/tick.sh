@@ -8,6 +8,11 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$here/protocol.sh"
 handoff_init
 
+# 总开关（仓库变量 OPENCLAW_HANDOFF=1 才启用；未设 → 纯传统路径）
+if [ "${OPENCLAW_HANDOFF:-}" != "1" ]; then
+  exit 0
+fi
+
 REMAIN="${1:-0}"
 case "$REMAIN" in ''|*[!0-9]*) REMAIN=0 ;; esac
 TRIGGER_AT=$(( ${HANDOFF_TRIGGER_BEFORE_MIN:-12} * 60 ))

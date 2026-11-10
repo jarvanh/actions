@@ -26,6 +26,23 @@ fi
 _dns="$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName // empty' 2>/dev/null | head -n 1 || true)"
 _dns="${_dns%.}"
 _ts_suffix="${_dns#*.}"
+# 2026-11-10：先当场试一次改名（旧节点此时已退场，成功率最高），再落守护兜底。
+# 只靠守护出过事故：守护自身有 bug 时名字会静默永久停在 openclaw-next/tmp，
+# 而 ts.env / RustDesk / serve 地址都跟着错。
+if [ -n "$_ts_suffix" ] && [ "$_dns" != "openclaw.${_ts_suffix}" ]; then
+  for _i in 1 2 3 4 5; do
+    sudo -n tailscale set --ssh --hostname=openclaw --advertise-exit-node >/dev/null 2>&1 || true
+    sleep 2
+    _dns2="$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
+    if [ "$_dns2" = "openclaw.${_ts_suffix}" ]; then
+      echo "✅ [serving] 主机名已当场收回：${_dns2}"
+      _dns="$_dns2"
+      break
+    fi
+  done
+  [ "$_dns" = "openclaw.${_ts_suffix}" ] || echo "⚠️ [serving] 当场改名未生效（当前 ${_dns}），交给守护重试"
+fi
+
 if [ -n "$_ts_suffix" ] && [ "$_dns" != "openclaw.${_ts_suffix}" ] \
    && [ -f "${GITHUB_WORKSPACE}/.github/scripts/tailscale/ts-reclaim-hostname.sh" ]; then
   TS_API_KEY="${TS_API_KEY:-}" setsid nohup bash "${GITHUB_WORKSPACE}/.github/scripts/tailscale/ts-reclaim-hostname.sh" \

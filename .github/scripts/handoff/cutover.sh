@@ -38,6 +38,12 @@ abort_handoff() { # <原因>
   exit 1
 }
 
+# ── 0. 总开关（与 tick.sh 同源；未启用则直接走传统收尾）──
+if [ "${OPENCLAW_HANDOFF:-}" != "1" ]; then
+  echo "ℹ️ [cutover] OPENCLAW_HANDOFF!=1，交接未启用 → 传统收尾"
+  exit 1
+fi
+
 # ── 0. 预检：必须已武装，且继任者存活 ──
 [ -f "$ENABLED" ] && [ -f "$SID_FILE" ] || { echo "ℹ️ [cutover] 未武装交接，走传统收尾"; exit 1; }
 SID="$(cat "$SID_FILE" 2>/dev/null | tr -dc '0-9')"

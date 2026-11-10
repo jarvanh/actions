@@ -44,6 +44,11 @@ jobs:
     env:
       # 2026-11-10 Phase 1：继任轮标记（空=普通轮）。protocol.sh 全家读它判模式。
       HANDOFF_OF: ${{ inputs.handoff_of || '' }}
+      # 2026-11-10：交接总开关。仓库变量 OPENCLAW_HANDOFF=1 才启用；未设/其他值
+      # = 纯传统路径（不触发继任者、不交出、不动隧道与主机名）。
+      # 生产出过「Tailscale 改名卡 tmp」与「AI 直传版本错配」两个问题后加的闸：
+      # 要停只需删掉这个仓库变量，不必回滚代码。
+      OPENCLAW_HANDOFF: ${{ vars.OPENCLAW_HANDOFF }}
       TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
       TS_OAUTH_CLIENT_SECRET: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
       # Tailscale API access token（tskey-api-*）：具备 devices 读写权限，用于
@@ -2143,6 +2148,16 @@ jobs:
           # 的下线秒数打进日志（生产每轮都会有一条 ★ 整体上线）。
           bash "$GITHUB_WORKSPACE/.github/scripts/handoff/full-ready.sh" 900 \
             || echo "::warning::[post-cutover] 全服务就绪探测超时（详见上方未就绪清单）"
+          # 2026-11-10：AI 整包直取是后台进程，结果只落在 /tmp；这里显式回显，
+          # 否则「直取到底成没成功」在 step 日志里完全不可见 —— 生产首轮就是
+          # 因为这样看起来「从来没成功过」。
+          echo "──── AI 整包直取结果 ────"
+          tail -n 6 /tmp/handoff-ai-fetch.log 2>/dev/null || echo "（无 ai-fetch 日志）"
+          if [ -s /tmp/openclaw-prefetch/OmniRoute.tar.gz ]; then
+            echo "✅ 快路径命中：OmniRoute 整包来自 rsync 直传"
+          else
+            echo "ℹ️ 走 Dropbox 回退：OmniRoute 整包来自云端归档"
+          fi
 
       - name: Install auxiliary CLIs (clawhub)
         # 2026-11-01：ZCode 数据还原已前移为「Restore ZCode data (先于 Tailscale 接入)」
