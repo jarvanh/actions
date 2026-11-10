@@ -184,7 +184,14 @@ jobs:
           # 之后非 root 的归档循环再读它就变成
           # "Failed to load config file ... permission denied" —— 即本次 CLIProxyAPI.tar.gz 上传失败的根因。
           # --allow-other 需要 fuse 允许非 root 共享挂载，挂载点也交给 runner 才能免 sudo 挂载。
-          grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
+          # Ubuntu 26.04（2026-11-09 17:31Z 起 ubuntu-latest 漂移目标）的 fusermount3
+          # AppArmor 白名单只放行 @{HOME}、/mnt、/run/user/<uid>、/media、/tmp，/dropbox
+          # 被 EPERM 拒绝 → rclone 秒退 1 → 挂载点被写脏后永久 "not empty"，
+          # 进而 ~/.cloudflared 凭据缺失、隧道全挂（实测 1033 + 看板不可用）。
+          # fuse_apparmor.sh 的 ensure_fuse_mountpoint 幂等做三件事：补 user_allow_other、补 AppArmor local 规则、
+          # 把未挂载却非空的残留挪到 /tmp/rclone-orphan-<ts>。
+          source "$GITHUB_WORKSPACE/.github/scripts/lib/fuse_apparmor.sh"
+          ensure_fuse_mountpoint /dropbox
 
           # 挂载 Dropbox
           # 参数按"配置 / Docker 数据卷"画像——小文件随机读写，不需要大块顺序预读：
@@ -221,13 +228,25 @@ jobs:
           fi
 
           echo "Waiting for mount..."
+          mounted=0
           for i in {1..30}; do
             if mount | grep -q " on /dropbox " && ls /dropbox >/dev/null 2>&1; then
               echo "✅ Dropbox mounted"
+              mounted=1
               break
             fi
             sleep 2
           done
+          # 2026-11-10 教训：这步以前失败也静默放行，于是一整轮 run 都在「无持久化
+          # 状态」下跑（凭据/看板/syncthing 全缺），远端只能看到一个 1033。现在直接
+          # 失败并把诊断信息打出来，宁可早停也不要带病跑 6 小时。
+          if [ "$mounted" != 1 ]; then
+            echo "::error::Dropbox 挂载失败（/dropbox 未就绪）"
+            tail -20 /opt/logs/rclone-dropbox.log 2>/dev/null || true
+            sudo dmesg 2>/dev/null | grep -i apparmor | tail -5 || true
+            journalctl --user -u rclone-dropbox -n 20 --no-pager 2>/dev/null || true
+            exit 1
+          fi
       - name: Prefetch cold artifacts (后台并行)
         # 把「与本轮状态无关」的大块下载从串行关键路径上摘出去。实测一轮冷启动里
         # 主包下载 54s、omniroute 镜像 35.7s、rss 镜像 ~20s 都排在各自消费步骤里干
@@ -1327,10 +1346,27 @@ jobs:
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
           sudo mkdir -p ~/.cloudflared/
-          sudo cp -r /dropbox/self-hosted/.cloudflared/* ~/.cloudflared/ 2>/dev/null || true
+          # 2026-11-10 1033 事故：/dropbox 挂载失败时这里静默复制 0 个文件，隧道随后
+          # 无限重启（Cannot determine default origin certificate path），远端只看到
+          # 1033。现在两条路：挂载可用就走本地，否则直接从 Dropbox 远端 rclone 兜底取。
+          if [ -s /dropbox/self-hosted/.cloudflared/cert.pem ]; then
+            sudo cp -r /dropbox/self-hosted/.cloudflared/* ~/.cloudflared/ 2>/dev/null || true
+          else
+            echo "::warning::/dropbox 不可用，改用 rclone 直连远端恢复 cloudflared 凭据"
+            rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared \
+              --config /home/runner/.config/rclone/rclone.conf \
+              --include 'cert.pem' --include '*.json' 2>/dev/null || true
+          fi
           # 家目录里的状态必须是 runner 属主：sudo 复制会让凭据变成 root 属主，
           # 而 cloudflared 是 runner 身份启动的（读 ~/.cloudflared 会 EACCES）
           sudo chown -R runner:runner ~/.cloudflared
+          # 硬校验：凭据缺失时后续隧道只会空转重启，远端表现为 1033，极难回溯。
+          if [ ! -s ~/.cloudflared/cert.pem ]; then
+            echo "::error::cloudflared 凭据缺失（~/.cloudflared/cert.pem），隧道将报 1033"
+            ls -la ~/.cloudflared/ || true
+            exit 1
+          fi
+          echo "✅ cloudflared 凭据就绪：$(ls ~/.cloudflared/*.json 2>/dev/null | wc -l) 个隧道凭据"
 
       - name: Run workbuddy-gateway (check update first, then serve)
         id: run_workbuddy

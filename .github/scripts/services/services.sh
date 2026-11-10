@@ -452,6 +452,20 @@ StartLimitBurst=0
 
 [Service]
 Type=simple
+# ── 挂载前提自愈（2026-11-10 事故修复，四条缺一即挂不上）─────────────
+# 事故链：本单元原先 enabled 到 default.target，登录瞬间就自启，早于 workflow
+# 「Mount Dropbox」准备 /etc/fuse.conf；且 Ubuntu 的 fusermount3 AppArmor 配置
+# 只放行 @{HOME}、/mnt、/run/user/@{uid}、/media、/tmp 下的 FUSE 挂载，/dropbox
+# 被直接拒绝（dmesg: apparmor="DENIED" name="/dropbox/"）。两次失败后其它步骤
+# 把文件写进未挂载的 /dropbox → 之后永久 "/dropbox is not empty"（实测
+# 1091 次重启空转），连锁导致 ~/.cloudflared 凭据、quota-board 看板、syncthing
+# 全部缺失，远端只看到 Cloudflare 1033。
+# 现在 ensure 会 disable 自启（只在 workflow 准备好之后拉起），并把四项前提做成
+# ExecStartPre：任一缺失都能就地自愈，不再依赖步骤顺序。
+ExecStartPre=+/bin/sh -c 'grep -q "^user_allow_other" /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null'
+ExecStartPre=+/bin/sh -c 'grep -q /dropbox /etc/apparmor.d/local/fusermount3 2>/dev/null || { printf "%s\n" "mount fstype=@{fuse_types} options=(nosuid,nodev) options in (ro,rw,noatime,dirsync,nodiratime,noexec,sync) -> /dropbox/{,**/}," "umount /dropbox/{,**/}," | sudo tee -a /etc/apparmor.d/local/fusermount3 >/dev/null; sudo apparmor_parser -r /etc/apparmor.d/fusermount3 2>/dev/null || true; }'
+ExecStartPre=-/usr/bin/fusermount3 -uz /dropbox
+ExecStartPre=+/bin/sh -c 'mountpoint -q /dropbox && exit 0; [ -z "\$(ls -A /dropbox 2>/dev/null)" ] && exit 0; d=/tmp/dropbox-orphan-\$(date +%Y%m%d-%H%M%S); mkdir -p "\$d"; find /dropbox -mindepth 1 -maxdepth 1 -exec mv -t "\$d" {} + 2>/dev/null || true; logger -t rclone-dropbox "挂载点非空，残留已移至 \$d"'
 # 参数画像："配置 / Docker 数据卷"——小文件随机读写，不需要大块顺序预读。
 #   --cache-dir        默认 ~/.cache/rclone 会落进根分区（≈14GB），必须指向 /mnt
 #   --attr-timeout 1m  原 10m：容器内文件频繁增删改，属性缓存 10 分钟有陈旧风险
@@ -586,7 +600,14 @@ cmd_ensure() {
   esac
 
   # 幂等 enable：user manager 常驻（Linger=yes），system 级随 multi-user.target
-  svc "$name" enable >/dev/null 2>&1
+  # 例外 rclone-dropbox（2026-11-10）：**不能**自启。它在 default.target 上会于
+  # 登录瞬间先于 workflow 准备挂载前提而起，失败后挂载点被写脏 → 永久 not empty。
+  # 改由 Mount Dropbox 步骤 ensure 时拉起；这里显式 disable，清掉历史自启软链。
+  if [ "$name" = rclone-dropbox ]; then
+    svc "$name" disable >/dev/null 2>&1 || true
+  else
+    svc "$name" enable >/dev/null 2>&1
+  fi
 
   # ⚠️ 裸跑实例优先（2026-10-05 加）：单元尚未接管、但同功能进程已在跑时，
   #    **不重启** —— 过渡期单元与旧裸跑实例并存，无条件 restart 会造成：
