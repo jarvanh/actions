@@ -12,6 +12,8 @@ jobs:
     # 安全守卫（2026-09-08）：公开仓库任何人 star 都会触发 watch 事件——仅放行仓库本人，
     # schedule / workflow_dispatch 等其余触发方式不受影响
     if: github.event_name != 'watch' || github.actor == 'jarvanh'
+    # 2026-11-10：mount 层已由 .github/scripts/lib/fuse_apparmor.sh 适配 26.04，
+    # 并在真实 26.04 runner 上验证四类挂载点全部通过（run 42730947602），用回 ubuntu-latest。
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -41,6 +43,10 @@ jobs:
           # 挂载改用 runner 用户（与 emby.yml 一致）：root 身份挂载时 rclone 刷新 token 会把
           # rclone.conf 回写成 root:600，之后非 root 的 rclone 读取即 EACCES
           grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
+          # 26.04 的 fusermount3 AppArmor 白名单不含 /onedrive（否则 mount 秒退 1）；
+          # fuse_apparmor.sh 统一处理 user_allow_other / AppArmor / 未挂载残留。
+          source "$GITHUB_WORKSPACE/.github/scripts/lib/fuse_apparmor.sh"
+          ensure_fuse_mountpoint /onedrive
           # 启动 rclone mount
           # 参数按"混合（应用目录）"画像：读 config.ini 之类的小文件，同时批量下载图片写入
           #   --cache-dir          默认 ~/.cache/rclone 会落进根分区（≈14GB），必须指向 /mnt

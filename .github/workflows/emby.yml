@@ -155,11 +155,9 @@ jobs:
     # 2026-11-09 17:31Z 起 ubuntu-latest 漂移到 ubuntu-26.04：该镜像的 fusermount3
     # AppArmor 白名单只放行 HOME/mnt/run-user/media/tmp，/onedrive 被 EPERM 拒绝，
     # rclone mount 2 秒退 1，后续 20+ 步全 skipped。
-    # 挂载层已就绪：rclone-run 里补了 /onedrive 的 AppArmor local 规则，并已在真实
-    # 26.04 runner 上验证通过（2026-11-10，临时分支 test/apparmor-2604）。
-    # 但整条链（emby 安装/启动/预热）尚未在 26.04 跑通，故暂钉最后一个已知可用镜像；
-    # 待整轮验证后再改回 ubuntu-latest。
-    runs-on: ubuntu-24.04
+    # 挂载层已由 .github/scripts/lib/fuse_apparmor.sh 统一适配，并在真实 26.04
+    # runner 上验证 4/4 挂载点通过（2026-11-10 run 42730947602），故用回 ubuntu-latest。
+    runs-on: ubuntu-latest
     steps:
       - name: checkout repo
         # 检出仓库，使 .github/scripts/emby302/ 下的脚本可用（与 openlist.yml 同做法）
@@ -206,20 +204,11 @@ jobs:
           RESERVE_G=$(( MNT_RESERVE_KB / 1024 / 1024 ))
           echo "VFS 预算: 上限 ${VFS_MAX_G}G / /mnt 剩余 $(( $(mnt_free_kb) / 1024 / 1024 ))G / 预留 ${RESERVE_G}G"
 
-          # Ubuntu 26.04 起 fusermount3 的 AppArmor 白名单只放行 @{HOME}、/mnt、
-          # /run/user/<uid>、/media、/tmp；/onedrive 在名单外 → mount 被 EPERM 拒绝，
-          # rclone 秒退 1（2026-11-09 镜像漂移到 26.04 后整条 Emby 链全部 skipped）。
-          # 就近补一条最小授权（仅本项目挂载点，保留 nosuid,nodev）；24.04 无此文件，跳过。
-          if [ -f /etc/apparmor.d/fusermount3 ]; then
-            if ! grep -qF '/onedrive/' /etc/apparmor.d/local/fusermount3 2>/dev/null; then
-              sudo mkdir -p /etc/apparmor.d/local
-              printf '%s\n' \
-                'mount fstype=@{fuse_types} options=(nosuid,nodev) options in (ro,rw,noatime,dirsync,nodiratime,noexec,sync) -> /onedrive/{,**/},' \
-                'umount /onedrive/{,**/},' \
-                | sudo tee -a /etc/apparmor.d/local/fusermount3 >/dev/null
-            fi
-            sudo /usr/sbin/apparmor_parser -r /etc/apparmor.d/fusermount3 2>/dev/null || true
-          fi
+          # Ubuntu 26.04 的 fusermount3 AppArmor 白名单不含 /onedrive：mount 会被 EPERM
+          # 拒绝、rclone 秒退 1。共享函数幂等补齐 user_allow_other / AppArmor 规则 /
+          # 未挂载却非空的残留清理（老镜像无 profile 时自动跳过 AppArmor 部分）。
+          source "$GITHUB_WORKSPACE/.github/scripts/lib/fuse_apparmor.sh"
+          ensure_fuse_mountpoint /onedrive
 
           rclone mount onedrive: /onedrive \
             --config /home/runner/.config/rclone/rclone.conf \

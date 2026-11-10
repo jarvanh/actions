@@ -70,6 +70,17 @@ jobs:
           sudo chown -R runner:runner /content
           sudo mkdir -p /mnt/vfs /opt/logs
           sudo chown runner:runner /mnt/vfs /opt/logs
+          # Ubuntu 26.04 的 fusermount3 AppArmor 白名单不含 /content/…（否则 mount 秒退 1）；
+          # fuse_apparmor.sh 统一补 user_allow_other / AppArmor / 未挂载残留。
+          source "$GITHUB_WORKSPACE/.github/scripts/lib/fuse_apparmor.sh"
+          ensure_fuse_mountpoint \
+            /content/drive/MyDrive/1024 \
+            /content/drive/MyDrive/my/i \
+            /content/drive/MyDrive/my/j \
+            /content/drive/MyDrive/my/k \
+            /content/drive/MyDrive/my/av1 \
+            /content/drive/MyDrive/my/av2 \
+            /content/drive/MyDrive/my/dropbox
 
           # 七个远程逐个挂载。参数按"媒体播放"画像：大文件顺序读 + 拖进度（随机 seek）
           #   --cache-dir         每个远程独立子目录（官方明确：同一缓存目录不要给重叠远程共用）
