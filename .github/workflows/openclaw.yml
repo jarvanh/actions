@@ -71,6 +71,12 @@ jobs:
       # 故在 job 级统一注入，一次覆盖全部 step（含上面那段持久化逻辑）。
       GH_TOKEN: ${{ github.token }}
     steps:
+      # checkout 必须排在 Handoff guard 之前：guard 以仓库内的
+      # .github/scripts/handoff/guard.sh 为入口，而 runner 初始 workspace 是空的。
+      # 排在后面时 guard 会以 127 失败，并因无 always() 把 checkout 连同整条链跳过
+      #（run 42738639200 / 42748258649 实测）。
+      - uses: actions/checkout@v7
+
       - name: Handoff guard (cron 兜底让位检查)
         # 2026-11-10 Phase 1：并发单例改为动态组后的第一道防双服闸。
         # 触发场景 = 旧轮 job 已结束、继任者已在 serving，组里排队的 cron 轮拿到
@@ -106,8 +112,7 @@ jobs:
         with:
           # 上一步骤解析的最新稳定版；'26' 仅为表达式空值兜底
           node-version: ${{ env.NODE_STABLE || '26' }}
-          
-      - uses: actions/checkout@v7
+
       - name: Lock hostname to openclaw
         # 2026-10-30：临时 runner 每次重建，OS hostname 都是云镜像默认名（本轮实测
         # runnervm48cm3），而 Tailscale 的 --hostname=openclaw 只改 DNS 名、不改本机
