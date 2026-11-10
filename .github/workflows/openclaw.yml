@@ -178,6 +178,7 @@ jobs:
           TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           # 2026-10-29 下线优化（B3）：hosted runner 镜像自带 apt 索引，直接安装；
           # 索引过期导致失败时再补 update 重装（实测 apt-get update 占本步骤大半耗时）。
@@ -261,11 +262,15 @@ jobs:
             # 系统级故障必须主动告知（2026-11-10 1033 事故教训：挂了 3 小时无人知）
             if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}" ]; then
               source "$GITHUB_WORKSPACE/.github/scripts/telegram/tg_notify.sh"
+              # 版式按 docs/telegram-notify.md 4.7 告警形态：
+              # 对象机器值（<code>）+ 结论裸文本 + <pre> 原始输出 + 收尾区
               msg=""
               tg_add_title msg "🚨 Dropbox 挂载失败"
-              tg_add_kv msg "主机" "$(hostname)"
-              tg_add_kv msg "运行" "$GITHUB_RUN_ID"
-              tg_add_block msg "$(escape_html "$(tail -8 /opt/logs/rclone-dropbox.log 2>/dev/null)")"
+              tg_add_path msg "主机" "$(hostname)"
+              tg_add_path msg "Run ID" "$GITHUB_RUN_ID"
+              tg_add_kv msg "结论" "挂载点未就绪，本轮无法恢复持久化状态"
+              tg_add_section msg "🧾 原始输出"
+              tg_add_block msg "<pre>$(escape_html "$(tail -8 /opt/logs/rclone-dropbox.log 2>/dev/null)")</pre>"
               tg_add_footer msg
               send_tg "$msg" alert || true
             fi

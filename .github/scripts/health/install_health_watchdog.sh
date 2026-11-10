@@ -30,6 +30,8 @@ umask 077
     echo "TELEGRAM_BOT_TOKEN_ALERT=${TELEGRAM_BOT_TOKEN_ALERT}"
     echo "TELEGRAM_CHAT_ID_ALERT=${TELEGRAM_CHAT_ID_ALERT:-}"
   fi
+  # 收尾区运行日志链接（规范 · 收尾区；缺席时 tg_add_footer 自动省略该段）
+  [ -n "${TG_RUN_URL:-}" ] && echo "TG_RUN_URL=${TG_RUN_URL}"
 } > "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 

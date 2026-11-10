@@ -23,11 +23,12 @@ set -u
 
 TG_LIB="${TG_LIB:-$HOME/.openclaw/bin/tg_notify.sh}"
 STATE="${HEALTH_STATE:-/tmp/system-health-state}"
-FORCE=0; QUIET=0
+FORCE=0; QUIET=0; PRINT=0
 for a in "$@"; do
   case "$a" in
     --force) FORCE=1 ;;
     --quiet) QUIET=1 ;;
+    --print) PRINT=1 ;;
   esac
 done
 
@@ -98,6 +99,12 @@ else
   fails+=("❌ OpenClaw gateway 18789 未监听")
 fi
 
+# 测试口：只用于核对版式（HEALTH_SIMULATE_FAIL="a|b"），生产不设置
+if [ -n "${HEALTH_SIMULATE_FAIL:-}" ]; then
+  IFS='|' read -ra _sim <<< "$HEALTH_SIMULATE_FAIL"
+  for _f in "${_sim[@]}"; do fails+=("❌ $_f"); done
+fi
+
 now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 signature=$(printf '%s\n' "${fails[@]:-}" | md5sum | cut -d' ' -f1)
 prev_sig=""; prev_at=0
@@ -135,23 +142,41 @@ fi
 # shellcheck disable=SC1090
 source "$TG_LIB"
 
-if [ ${#fails[@]} -eq 0 ]; then
-  title="✅ 系统健康恢复"
-  body="$(printf '%s\n' "${ok_notes[@]}")"
-  tier=""
-else
-  title="🚨 系统级故障"
-  body="$(printf '%s\n' "${fails[@]}")
-$(printf '%s\n' "${ok_notes[@]}")"
-  tier="alert"
-fi
-
 host=$(hostname 2>/dev/null || echo runner)
-# 排版助手第一参是「消息变量名」（tg_add_* 原地追加），与 workflow 内联写法一致
+# 版式真源：docs/telegram-notify.md
+#   - 机器值（主机名/Run ID）走 tg_add_path（<code> 等宽）
+#   - 清单走 tg_add_section + tree_lines（唯一条目前缀），不用 tg_add_block 铺平文本
+#   - 原始输出才用 <pre>（4.7 告警形态），且作为正文最后一块
+#   - 收尾区一律 tg_add_footer
+#   - 计数放分节标题 " · N"
 msg=""
-tg_add_title msg "$title"
-tg_add_kv msg "主机" "$host"
-tg_add_kv msg "时间" "$now"
-tg_add_block msg "$(escape_html "$body")"
+if [ ${#fails[@]} -eq 0 ]; then
+  tg_add_title msg "✅ 系统健康恢复"
+  tg_add_path msg "主机" "$host"
+  tg_add_kv msg "时间" "$now"
+  tg_add_note msg "此前异常的检查项已全部恢复正常"
+else
+  tg_add_title msg "🚨 系统级故障 · ${#fails[@]} 项"
+  tg_add_path msg "主机" "$host"
+  tg_add_kv msg "时间" "$now"
+  tg_add_section msg "🔍 异常 · ${#fails[@]}"
+  _lines=""
+  for f in "${fails[@]}"; do
+    _lines+="$(escape_html "${f#❌ }")"$'\n'
+  done
+  tg_add_block msg "$(tree_lines "${_lines%$'\n'}")"
+  tg_add_kv msg "其余检查项" "${#ok_notes[@]} 项正常"
+fi
 tg_add_footer msg
-send_tg "$msg" "$tier" || echo "[health] ⚠️ TG 发送失败（凭据或网络）"
+
+if [ "$PRINT" = 1 ]; then
+  printf '%s\n' "$msg"
+  exit 0
+fi
+if [ ! -f "$TG_LIB" ]; then
+  echo "[health] ⚠️ 缺少 $TG_LIB，跳过 TG 通知"
+  exit 0
+fi
+# shellcheck disable=SC1090
+source "$TG_LIB"
+send_tg "$msg" "${tier:-}" || echo "[health] ⚠️ TG 发送失败（凭据或网络）"
