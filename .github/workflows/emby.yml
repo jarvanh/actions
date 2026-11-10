@@ -152,7 +152,10 @@ jobs:
     # schedule / workflow_dispatch 等其余触发方式不受影响
     if: github.event_name != 'watch' || github.actor == 'jarvanh'
     concurrency: emby-singleton
-    runs-on: ubuntu-latest
+    # 2026-11-09 18:31Z 起 ubuntu-latest 漂移到 ubuntu-26.04，rclone mount 在该镜像上
+    # 2 秒即 exit 1（同样参数在 24.04 正常），整条 Emby 链全 skipped。
+    # 先钉回最后一个已知可用镜像；根因查清前不要改回 ubuntu-latest。
+    runs-on: ubuntu-24.04
     steps:
       - name: checkout repo
         # 检出仓库，使 .github/scripts/emby302/ 下的脚本可用（与 openlist.yml 同做法）
@@ -199,6 +202,21 @@ jobs:
           RESERVE_G=$(( MNT_RESERVE_KB / 1024 / 1024 ))
           echo "VFS 预算: 上限 ${VFS_MAX_G}G / /mnt 剩余 $(( $(mnt_free_kb) / 1024 / 1024 ))G / 预留 ${RESERVE_G}G"
 
+          # Ubuntu 26.04 起 fusermount3 的 AppArmor 白名单只放行 @{HOME}、/mnt、
+          # /run/user/<uid>、/media、/tmp；/onedrive 在名单外 → mount 被 EPERM 拒绝，
+          # rclone 秒退 1（2026-11-09 镜像漂移到 26.04 后整条 Emby 链全部 skipped）。
+          # 就近补一条最小授权（仅本项目挂载点，保留 nosuid,nodev）；24.04 无此文件，跳过。
+          if [ -f /etc/apparmor.d/fusermount3 ]; then
+            if ! grep -qF '/onedrive/' /etc/apparmor.d/local/fusermount3 2>/dev/null; then
+              sudo mkdir -p /etc/apparmor.d/local
+              printf '%s\n' \
+                'mount fstype=@{fuse_types} options=(nosuid,nodev) options in (ro,rw,noatime,dirsync,nodiratime,noexec,sync) -> /onedrive/{,**/},' \
+                'umount /onedrive/{,**/},' \
+                | sudo tee -a /etc/apparmor.d/local/fusermount3 >/dev/null
+            fi
+            sudo /usr/sbin/apparmor_parser -r /etc/apparmor.d/fusermount3 2>/dev/null || true
+          fi
+
           rclone mount onedrive: /onedrive \
             --config /home/runner/.config/rclone/rclone.conf \
             --cache-dir /mnt/vfs/onedrive \
@@ -212,7 +230,14 @@ jobs:
             --vfs-read-chunk-size 32M --vfs-read-chunk-streams 4 \
             --vfs-handle-caching 5m \
             --daemon --daemon-wait 60s \
-            --log-file /opt/logs/rclone-mount.log --log-level INFO
+            --log-file /opt/logs/rclone-mount.log --log-level INFO \
+          || {
+            # --daemon 模式下真因只进日志文件，控制台只剩 "exit code 1"：
+            # 2026-11-09 镜像漂移那次就是靠猜。失败时把日志尾巴吐到 step 输出里。
+            echo "::error::rclone mount 失败（镜像 $(lsb_release -ds 2>/dev/null || true)）"
+            tail -n 50 /opt/logs/rclone-mount.log 2>/dev/null || echo "(无 rclone-mount.log)"
+            exit 1
+          }
       - name: install cloudflared
         run: |
           sudo mkdir -p ~/.cloudflared/
