@@ -99,7 +99,17 @@ done < <(find "$HOME/.zcode" -name '*.sqlite-wal' -size +0c -printf '%h\n' 2>/de
   | sed 's/-wal$//' | sort -u)
 echo "✅ [cutover] sqlite checkpoint 完成"
 
-# ── 2. 停本机隧道（oc=聊天公网入口 / qb=quota-board 面板），继任者接管后自起 ──
+# ── 2. 停本机自愈看门狗（必须在停隧道/停 AI 栈**之前**）──
+# openclaw-health 有「cftun-* 隧道自愈」：停掉的隧道 ≤5min 内会被它 sudo start
+# 拉回来 → 旧 VM 的 cloudflared connector 重新并入隧道 → 流量可能被路由到
+# 已停网关的旧机（用户侧表现为随机 5xx）。gateway-watchdog 只告警不重启，
+# zcode2api-proxy-watchdog 会拉起 node 代理 —— 一并暂停。旧 VM 随 job 销毁，
+# 无需恢复；继任 VM 的看门狗由新 run 自己安装（自带启动宽限期）。
+systemctl --user stop openclaw-health.timer gateway-watchdog.timer \
+  zcode2api-proxy-watchdog.timer 2>/dev/null || true
+echo "✅ [cutover] 本机自愈看门狗已暂停（防交接期间拉回隧道/服务）"
+
+# ── 2b. 停本机隧道（oc=聊天公网入口 / qb=quota-board 面板），继任者接管后自起 ──
 # 2026-11-10：测试模式（HANDOFF_TEST=1）绝不停生产隧道 —— 测试节点没有继任者
 # 接管生产隧道的流量（oc 隧道绑死生产云凭据与域名），停了生产公网入口就真黑了。
 if [ -n "${HANDOFF_TEST:-}" ]; then
