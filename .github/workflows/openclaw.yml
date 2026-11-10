@@ -16,6 +16,15 @@ on:
           - omniroute
           - clirelay
           - cliproxyapi
+      # 2026-11-10 Phase 1 warm-standby 交接：由 serving 主轮在死线前 T-12min 通过
+      # tick.sh 传入（值 = 旧轮 run id）。带此输入的 run 是「继任者」：并发组走专属
+      # 键与旧轮并存、启动段照常做基座恢复，然后等旧轮交出后 rsync 增量接管。
+      # 为空 = 普通轮（cron 兜底 / 手动 / 传统接力），走 guard + 原时序。
+      handoff_of:
+        description: "继任轮标记：被接管的旧轮 run id（普通运行留空）"
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -23,9 +32,18 @@ permissions:
 
 jobs:
   build:
-    concurrency: openclaw-singleton
+    # 2026-11-10 Phase 1：job 级单例改为动态并发组。serving 主轮独占
+    # openclaw-serve（cron 兜底轮在组里排队，不占 runner）；交接继任者用
+    # openclaw-handoff-<自身 run id> 专属键，从而能与尚在服务的旧轮并存
+    # —— 这是整个 warm-standby 的前提。防双服由三件套共同保证：
+    # 组排队 + guard.sh 自我取消 + 标记归属校验（详见 scripts/handoff/protocol.sh）。
+    concurrency:
+      group: ${{ inputs.handoff_of != '' && format('openclaw-handoff-{0}', github.run_id) || 'openclaw-serve' }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     env:
+      # 2026-11-10 Phase 1：继任轮标记（空=普通轮）。protocol.sh 全家读它判模式。
+      HANDOFF_OF: ${{ inputs.handoff_of || '' }}
       TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
       TS_OAUTH_CLIENT_SECRET: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
       # Tailscale API access token（tskey-api-*）：具备 devices 读写权限，用于
@@ -53,6 +71,16 @@ jobs:
       # 故在 job 级统一注入，一次覆盖全部 step（含上面那段持久化逻辑）。
       GH_TOKEN: ${{ github.token }}
     steps:
+      - name: Handoff guard (cron 兜底让位检查)
+        # 2026-11-10 Phase 1：并发单例改为动态组后的第一道防双服闸。
+        # 触发场景 = 旧轮 job 已结束、继任者已在 serving，组里排队的 cron 轮拿到
+        # runner —— 它必须让位，否则两个 VM 同时写同一份状态树。
+        # 判据与让位方式见 scripts/handoff/guard.sh；只对普通轮生效
+        #（继任轮带 handoff_of，天然要与服务中的旧轮并存，跳过本检查）。
+        if: ${{ inputs.handoff_of == '' }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/guard.sh"
+
       - name: Resolve latest stable Node
         # 2026-10-30：为 Setup Node 提供版本号。演进史：'current' 当日解析到
         # 27.0.0-alpha（runner 镜像连带），prerelease 按语义化版本规则不满足
@@ -91,16 +119,20 @@ jobs:
         # "unable to resolve host"。
         run: |
           set -euo pipefail
+          # 2026-11-10 Phase 1：交接继任轮在接管前用 openclaw-next —— tailnet 里
+          # 名字唯一，旧轮还活着时绝不能抢 openclaw（接管成功后由 serving.sh 拉起
+          # ts-reclaim 守护自动收回）。普通轮照旧。
+          if [ -n "${HANDOFF_OF:-}" ]; then _host="openclaw-next"; else _host="openclaw"; fi
           current="$(hostname)"
-          if [ "$current" = "openclaw" ]; then
-            echo "✅ hostname 已是 openclaw，无需修改"
+          if [ "$current" = "$_host" ]; then
+            echo "✅ hostname 已是 $_host，无需修改"
           else
-            sudo hostnamectl set-hostname openclaw
-            echo "✅ hostname: ${current} → openclaw"
+            sudo hostnamectl set-hostname "$_host"
+            echo "✅ hostname: ${current} → $_host"
           fi
-          if ! grep -qE '^127\.0\.1\.1[[:space:]]+openclaw([[:space:]]|$)' /etc/hosts; then
-            echo '127.0.1.1 openclaw' | sudo tee -a /etc/hosts >/dev/null
-            echo "✅ /etc/hosts 已补 127.0.1.1 openclaw"
+          if ! grep -qE "^127\.0\.1\.1[[:space:]]+${_host}([[:space:]]|$)" /etc/hosts; then
+            echo "127.0.1.1 ${_host}" | sudo tee -a /etc/hosts >/dev/null
+            echo "✅ /etc/hosts 已补 127.0.1.1 ${_host}"
           fi
           hostname
       - name: Seed ZCode server identity (先于客户端接入固定 installationId)
@@ -378,7 +410,13 @@ jobs:
           echo "$rc" > "$P/${KEY}-tar.rc"
           PF_EOF
           chmod +x "$P/pull-one-tar.sh"
-          for _pf_name in OmniRoute; do
+          # 2026-11-10 Phase 1：继任轮跳过 OmniRoute.tar.gz 预取 —— run-ai-gateway 的
+          # fetch_via_prefetch 会无条件收货这份 ≤20min 前的周期包，绕过「等旧轮最终
+          # 归档」闸门，把陈旧数据当新鲜用（零丢失破口）。继任轮的 OmniRoute 数据
+          # 统一由 gate 放行后的同步恢复路径取旧轮死线后的最终归档。
+          _pf_list="OmniRoute"
+          [ -n "${HANDOFF_OF:-}" ] && _pf_list=""
+          for _pf_name in ${_pf_list}; do
             _pf_key="$(printf '%s' "$_pf_name" | tr 'A-Z' 'a-z')"
             _pf_bytes="$(rclone size --json "dropbox:self-hosted/${_pf_name}.tar.gz" 2>/dev/null | jq -r '.bytes // 0' 2>/dev/null)" || _pf_bytes=0
             case "${_pf_bytes:-0}" in ''|*[!0-9]*) _pf_bytes=0 ;; esac
@@ -460,7 +498,12 @@ jobs:
       # （消费 Prefetch 已拉起的 OmniRoute.tar.gz），等不到才回落同步下载。
       - name: Start OmniRoute prestart (background, 与启动段重叠)
         id: omniroute_prestart
-        if: ${{ !cancelled() }}
+        # 2026-11-10 Phase 1：交接继任轮跳过 —— prestart 会用 ≤20min 前的周期包恢复
+        # OmniRoute 数据并起容器，而旧轮的最终归档（含最新数据）要等接管后才上传；
+        # 若在此起容器，Run AI API gateway 会认 prestart rc 直接复用 → 上游用旧数据
+        # 服务，违反零丢失。跳过后 run-ai-gateway.sh 自带恢复路径照常兜住（gate 等
+        # archives_done 放行时数据已新鲜）。
+        if: ${{ !cancelled() && inputs.handoff_of == '' }}
         continue-on-error: true
         env:
           AI_BACKEND_INPUT: ${{ inputs.ai_backend || 'auto' }}
@@ -698,7 +741,10 @@ jobs:
       # 任何「还原/迁移类」新步骤都不得排到本行之后；细节见 docs/openclaw.md「还原时序」。
       - name: Clean stale Tailscale nodes (openclaw* 僵尸清退)
         id: ts_clean
-        if: ${{ always() && (env.TS_API_KEY != '' || (env.TS_OAUTH_CLIENT_ID != '' && env.TS_OAUTH_CLIENT_SECRET != '')) }}
+        # 2026-11-10 Phase 1：交接继任轮必须跳过 —— 旧轮节点此刻活着且在服务，
+        # 本步的「connectedToControl=false 才删」+ 150s 心跳等待语义完全不适用，
+        # 误判会删掉正在服务的节点。继任轮的主机名回收由 serving.sh 的守护负责。
+        if: ${{ always() && inputs.handoff_of == '' && (env.TS_API_KEY != '' || (env.TS_OAUTH_CLIENT_ID != '' && env.TS_OAUTH_CLIENT_SECRET != '')) }}
         env:
           TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           TS_OAUTH_CLIENT_SECRET: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
@@ -894,7 +940,10 @@ jobs:
           # openclaw 残留，控制面当场就分配 openclaw-1，事后 set 改不回来
           # （prefs 里 Hostname 写对了，DNS 名仍是 openclaw-1，2026-10-01 实锤）。
           # 注册即声明能消掉这个窗口，是防退化的第一优先手段。
-          hostname: openclaw
+          # 2026-11-10 Phase 1：继任轮注册为 openclaw-next —— 旧轮节点此刻活着，
+          # 抢 openclaw 会顶掉服务中节点的 DNS 名；接管成功后由 serving.sh 拉起
+          # 回收守护把名字收回来（ts-reclaim-hostname.sh 自带周期重试）。
+          hostname: ${{ inputs.handoff_of != '' && 'openclaw-next' || 'openclaw' }}
 
       - name: Enable Tailscale SSH
         id: ts_ssh
@@ -919,10 +968,14 @@ jobs:
           #      GET  https://api.tailscale.com/api/v2/tailnet/{tailnet}/devices  查到节点 id
           #      POST https://api.tailscale.com/api/v2/device/{device_id}/routes  body: {"routes": ["0.0.0.0/0", "::/0"]}
           #      （需 TS_API_KEY，ephemeral 节点 id 每次变化，需按主机名动态查询）
-          sudo tailscale set --ssh --hostname=openclaw --advertise-exit-node
+          # 2026-11-10 Phase 1：继任轮此刻叫 openclaw-next（旧轮还活着、占着 openclaw），
+          # 接管后由 serving.sh 的回收守护收回正名。Exit Node 两节点同时广告无害
+          # （tailnet 客户端自行选择出口），照旧保留。
+          if [ -n "${HANDOFF_OF:-}" ]; then _ts_host="openclaw-next"; else _ts_host="openclaw"; fi
+          sudo tailscale set --ssh --hostname="$_ts_host" --advertise-exit-node
           # 回读实际注册的 DNS 名。--hostname 的重命名有传播延迟，若 set 后立刻读取
           # 可能拿到机器原始主机名（如 github-runnervmgx7h7），导致 ts.env 里的 SSH/
-          # RustDesk 直连地址每轮漂移。这里轮询等待名字收敛为 openclaw。
+          # RustDesk 直连地址每轮漂移。这里轮询等待名字收敛为目标名。
           # tailnet 后缀（形如 xxxx.ts.net）动态取，避免硬编码到别的 tailnet 时写歪。
           TS_SUFFIX="$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
           TS_SUFFIX="${TS_SUFFIX#*.}"
@@ -930,7 +983,7 @@ jobs:
           for i in $(seq 1 15); do
             TS_FQDN="$(tailscale status --json | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
             case "$TS_FQDN" in
-              "openclaw.${TS_SUFFIX}") break ;;
+              "${_ts_host}.${TS_SUFFIX}") break ;;
             esac
             sleep 2
           done
@@ -939,7 +992,9 @@ jobs:
           # openclaw-1/-2…，根因是上一轮同名 ephemeral 节点残留在 tailnet——离线也照样占名。
           # 直连 set 对这种情况无效（prefs 里 Hostname 已写对，但 DNS 名仍是 openclaw-1）。
           # 兜底：先改到一个临时名把 openclaw 让出来，再改回去 —— 实测可强制收回名字。
-          if [ "${TS_FQDN:-}" != "openclaw.${TS_SUFFIX}" ]; then
+          # 2026-11-10 Phase 1：继任轮跳过这段 —— 它的 openclaw-next 是**刻意**的非目标名，
+          # 临时名中转回收只适用于普通轮的撞名场景（继任轮由 serving.sh 的守护接管）。
+          if [ -z "${HANDOFF_OF:-}" ] && [ "${TS_FQDN:-}" != "${_ts_host}.${TS_SUFFIX}" ]; then
             echo "⚠️ 主机名被占（当前 ${TS_FQDN:-未知}），走临时名中转回收 openclaw"
             sudo tailscale set --hostname="openclaw-tmp-$$" 2>&1 || true
             for i in $(seq 1 10); do
@@ -984,7 +1039,11 @@ jobs:
           #   更长的漏网由这里兜底）；② 收回名字后按 serve 现状重建全部端口，
           #   消掉「名字切了、serve 还挂旧名证书」的断网窗口（run 42517434977 实锤）。
           mkdir -p "$HOME/.openclaw/logs"
-          if [ "${TS_FQDN:-}" != "openclaw.${TS_SUFFIX}" ]; then
+          # 2026-11-10 Phase 1：继任轮跳过此守护 —— openclaw-next 是刻意为之，
+          # 名字回收推迟到接管成功后（serving.sh 拉起同一守护），避免与旧轮抢名。
+          if [ -n "${HANDOFF_OF:-}" ]; then
+            echo "ℹ️ 继任轮暂名 ${TS_FQDN}，接管后由 serving 回收 openclaw"
+          elif [ "${TS_FQDN:-}" != "openclaw.${TS_SUFFIX}" ]; then
             echo "🔁 当前名为 ${TS_FQDN}，启动后台回收守护（每 120s 重试收回 openclaw）"
             # 守护脚本本体独立成文件（.github/scripts/tailscale/ts-reclaim-hostname.sh）：
             # 内联 heredoc 里的行不带 YAML 块缩进，会打断 run 的缩进层级（实测 YAML 解析报
@@ -1066,13 +1125,15 @@ jobs:
         # key 用证书到期日：到期换新后 key 随之翻新，上游 restore-keys 前缀
         # 永远命中最新一张。同 key 重复 save 时 actions/cache 只告警不报错。
         # 2026-10-30 外置：脚本 ts-cert-cache.sh stash（yml 500KB 减重）。
-        if: ${{ always() && steps.ts_ssh.outcome == 'success' }}
+        # 2026-11-10 Phase 1：继任轮跳过 —— 证书刚从缓存恢复、无需再触发签发；
+        # 且旧轮死线后也会 stash，双写同 key 只是徒增一次 actions/cache 写。
+        if: ${{ always() && inputs.handoff_of == '' && steps.ts_ssh.outcome == 'success' }}
         env:
           TS_CERT_GPG_KEY: ${{ secrets.TS_CERT_GPG_KEY }}
         run: bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/ts-cert-cache.sh" stash
 
       - name: Save Tailscale certs cache
-        if: ${{ always() && steps.ts_certs_stash.outputs.saved == 'true' }}
+        if: ${{ always() && inputs.handoff_of == '' && steps.ts_certs_stash.outputs.saved == 'true' }}
         uses: actions/cache/save@v4
         with:
           path: ~/ts-cert-cache
@@ -1080,8 +1141,9 @@ jobs:
 
       - name: Tailscale secrets missing
         if: ${{ always() && env.TS_OAUTH_CLIENT_ID == '' && env.TS_OAUTH_CLIENT_SECRET == '' }}
+        # 2026-11-10 顺手修复：此处 run 原是坏的多行标量，混进了「zcode2api 预取」
+        # 的孤儿回显行（折叠成一条畸形 echo，secret 缺失时才执行所以从未爆过）。
         run: echo "⚠️ 未配置 TS_OAUTH_CLIENT_ID / TS_OAUTH_CLIENT_SECRET，跳过 Tailscale SSH 调试入口"
-          echo "🚀 已后台预准备 zcode2api 代码+依赖（pid $!）"
       # 2026-10-11 事故根治：本轮（run 38118437892）收尾时 zcode-final.tar.gz 上传
       # 三连败于 path/insufficient_space（Dropbox 配额到顶），step 是 set -e 直接炸出
       # exit 1，且后续 4c/5/rsstt 归档整段被级联跳过。改在起跑最前面预检：配额不足
@@ -1162,7 +1224,11 @@ jobs:
       - name: Dispatch upstream services (early, 与 install 段重叠)
         id: dispatch_upstream_early
         # 2026-10-22 口径：本步失败不得级联跳过后续（收口 step 会兜底）
-        if: ${{ !cancelled() }}
+        # 2026-11-10 Phase 1：继任轮跳过 —— 六上游要等旧轮最终归档（gate:archives_done）
+        # 才能从「旧轮的最终数据」起服务；此刻派发只会用 20min 前的基座数据，
+        # 其中 workbuddy（Dropbox 直写）/autoclaw（Dropbox stats）还会与旧轮实例
+        # 产生双写。继任轮的派发收口在原六个 Run step（gate 放行后前台补跑）。
+        if: ${{ !cancelled() && inputs.handoff_of == '' }}
         continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -1397,11 +1463,21 @@ jobs:
           fi
           echo "✅ cloudflared 凭据就绪：$(ls ~/.cloudflared/*.json 2>/dev/null | wc -l) 个隧道凭据"
 
+      - name: Handoff takeover (继任轮：等交出 → rsync 增量 → 校验)
+        id: handoff_takeover
+        # 2026-11-10 Phase 1：只对继任轮生效（普通轮由脚本内部直通 + 此处 if 双保险）。
+        # 本步阻塞到旧轮死线交出（≤25min）并完成两棵状态树的增量直传 + 主 state 库
+        # 校验；之后各服务步骤经 gate 放行，从「同步后的新鲜状态」起服务。
+        # 失败 = 自我取消整个 run（数据零丢失由旧轮传统收尾兜底，见脚本头注释）。
+        if: ${{ !cancelled() && inputs.handoff_of != '' }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/takeover.sh"
+
       - name: Run workbuddy-gateway (check update first, then serve)
         id: run_workbuddy
         # 2026-10-22 步骤重排后位于 Run OpenClaw 之后：本步失败不得级联跳过
         # （此前排在前面自然免疫，2026-10-02 事故注释同款语义）
-        if: ${{ !cancelled() }}
+        if: ${{ inputs.handoff_of == '' && !cancelled() }}
         env:
           # send_tg 发送闸 + 收尾区接线（缺任一则本步骤通知静默跳过）
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -1461,7 +1537,7 @@ jobs:
       # /dropbox/self-hosted/.cloudflared 恢复，由 tunnels.conf 纳管。
       - name: Run trae2api container (TRAE SOLO reverse proxy)
         # 2026-10-22 步骤重排后位于 Run OpenClaw 之后：本步失败不得级联跳过
-        if: ${{ !cancelled() }}
+        if: ${{ inputs.handoff_of == '' && !cancelled() }}
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -1548,7 +1624,7 @@ jobs:
         id: run_zcode2api
         # 2026-10-02：trae2api 步骤硬失败时本步骤被默认语义级联跳过（continue-on-error
         # 只影响自身失败标记，不改变「前置失败则跳过」），与 Run OpenClaw 同款修复。
-        if: ${{ !cancelled() }}
+        if: ${{ inputs.handoff_of == '' && !cancelled() }}
         continue-on-error: true
         env:
           # send_tg 发送闸 + 收尾区接线（缺任一则本步骤通知静默跳过）
@@ -1594,7 +1670,7 @@ jobs:
       - name: Run qingyan-proxy (ChatGLM 清言反代)
         id: run_qingyan
         # 2026-10-22 步骤重排后位于 Run OpenClaw 之后：本步失败不得级联跳过
-        if: ${{ !cancelled() }}
+        if: ${{ inputs.handoff_of == '' && !cancelled() }}
         continue-on-error: true
         env:
           # send_tg 发送闸 + 收尾区接线（缺任一则本步骤通知静默跳过）
@@ -1652,7 +1728,7 @@ jobs:
 
       - name: Run qoder2api-hub container (Qoder 双区 OpenAI 兼容网关)
         # 2026-10-22 步骤重排后位于 Run OpenClaw 之后：本步失败不得级联跳过
-        if: ${{ !cancelled() }}
+        if: ${{ inputs.handoff_of == '' && !cancelled() }}
         continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -1708,7 +1784,7 @@ jobs:
         # 超时放行（run 41294902778 实锤：其余五上游 09:57 就绪，10:05:17 才放行）。
         # 切到外置脚本后 rc 写点在「端口就绪」处（签到/收割后置），等齐门不再被拖。
         # 接口契约（env 注入 / ts.env 依赖 / rc 落盘）：见 run-autoclaw.sh 头注。
-        if: ${{ !cancelled() }}
+        if: ${{ inputs.handoff_of == '' && !cancelled() }}
         continue-on-error: true
         env:
           # send_tg 发送闸 + 收尾区接线（缺任一则本步骤通知静默跳过）
@@ -1766,7 +1842,7 @@ jobs:
         # health 探活走 18789 本地）。三轮实测未见 doctor 探测 20128，固化现状。
         # 位置（B1c，主人拍板）：上游网关（workbuddy/trae/zcode2api/qingyan）之后启动 ——
         # OmniRoute 面世时渠道已全部健康，避免启动窗口的失败请求污染 circuit breaker。
-        if: ${{ !cancelled() }}
+        if: ${{ inputs.handoff_of == '' && !cancelled() }}
         continue-on-error: true
         env:
           # 手动运行时可指定本次使用的网关后端（auto = 自动降级链）；定时触发为 auto
@@ -1827,7 +1903,13 @@ jobs:
         # /tmp/run-openclaw-step.log、meta.env 等消费方不变。
         # 脚本非零退出即本步骤失败（outcome 消费方不受影响，id 保留）。
         if: ${{ !cancelled() && steps.install_openclaw.outcome == 'success' }}
-        run: bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-openclaw.sh"
+        run: |
+          bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-openclaw.sh"
+          # 2026-11-10 Phase 1：继任轮网关健康后回报 serving —— 旧轮 cutover 等的就是
+          # 它，收到即 handoff_done 并转纯备份收尾（下线窗口就此关闭）。
+          # serve 轮脚本内部直通。失败不掀桌：serving 未送达时旧轮 15min 超时回退
+          # 传统收尾（归档+Trigger next），零丢失仍由归档兜底。
+          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/serving.sh" || true
 
       - name: Notify OpenClaw startup failure
         if: ${{ always() && !cancelled() && (steps.install_openclaw.outcome != 'success' || steps.run_openclaw.outcome == 'failure') }}
@@ -2000,6 +2082,57 @@ jobs:
             echo "⚠️ Telegram alert skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty"
           fi
 
+      - name: Post-cutover upstream services (继任轮：等旧轮最终归档 → 上游+AI 网关)
+        id: post_cutover_upstream
+        # 2026-11-10 Phase 1：只对继任轮存在。六个上游 + AI 网关在原位置的步骤已被
+        # handoff 条件跳过 —— 它们的数据恢复脚本全部无条件从 Dropbox 归档拉取，
+        # 必须等旧轮死线后的「最终归档」上传完（old.json state=archives_done，
+        # 由 gate.sh 阻塞等待）才能起服务，否则 20min 前的基座数据会被当新鲜用。
+        # 时序代价：模型通道（OmniRoute:20128 + 上游）在 T0+6~10min 恢复 —— 与现状
+        # 「整条聊天路径黑 ~8min」持平；换来的是网关/UI/Tailscale 在 T0+2~3min 先亮。
+        # env 与「Dispatch upstream services (early)」+「Run AI API gateway」两步
+        # 逐字段对齐（改任一处需同步 —— 与 P5b 双份实现同款口径）。
+        if: ${{ !cancelled() && inputs.handoff_of != '' }}
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
+          TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          WB_GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ZCODE_GATEWAY_KEY: ${{ secrets.ZCODE_GATEWAY_API_KEY }}
+          QINGYAN_REFRESH_TOKEN: ${{ secrets.GLM_REFRESH_TOKEN }}
+          QINGYAN_GATEWAY_KEY: ${{ secrets.GLM2API_GATEWAY_KEY }}
+          QINGYAN_PORT: "8320"
+          QINGYAN_APP_REMOTE: dropbox:self-hosted/qingyan-proxy/app
+          QINGYAN_DATA_DIR: /dropbox/self-hosted/qingyan-proxy/data
+          QINGYAN_STATE_DIR: /dropbox/self-hosted/qingyan-proxy/data
+          QINGYAN_ENV_FILE: /dropbox/self-hosted/qingyan-proxy/env.sh
+          AUTOCLAW_GATEWAY_KEY: ${{ secrets.AUTOCLAW_GATEWAY_KEY }}
+          AUTOCLAW_REPO: https://github.com/jarvanh/autoclaw-proxy.git
+          AUTOCLAW_SNAPSHOT_REMOTE: dropbox:self-hosted/autoclaw-proxy/auth-snapshot.json
+          AUTOCLAW_STATS_REMOTE: dropbox:self-hosted/autoclaw-proxy/lifetime_stats.json
+          AUTOCLAW_PORT: "8322"
+          AI_BACKEND_INPUT: ${{ inputs.ai_backend || 'auto' }}
+        run: |
+          set -uo pipefail
+          OC_DIR="${GITHUB_WORKSPACE}/.github/scripts/openclaw"
+          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/gate.sh" archives_done || true
+          # 派发六上游（run-*.sh 调用即返回，真实部署在脚本内后台子壳；与 early-dispatch 同款）
+          _dispatched=0
+          for _u in workbuddy trae2api zcode2api qingyan qoder2api autoclaw; do
+            [ -f "/tmp/upstream-rc-$_u" ] && continue
+            bash -eo pipefail "$OC_DIR/run-$( [ "$_u" = qingyan ] && echo qingyan || echo "$_u" ).sh" \
+              || echo "::warning::[post-cutover] $_u 脚本返回非零（部署后台进行中或失败）"
+            _dispatched=$((_dispatched + 1))
+          done
+          echo "🚀 [post-cutover] 已派发 ${_dispatched}/6 上游（gate 放行，数据=旧轮最终归档）"
+          # AI 网关（OMNIROUTE_PRESTART 未设 → 脚本走同步恢复+起容器全路径；
+          # 内部自带 P5b 等齐门，会等上面六个 rc 就绪）
+          bash -eo pipefail "$OC_DIR/run-ai-gateway.sh" \
+            || echo "::warning::[post-cutover] run-ai-gateway 返回非零（降级链已尽力，详见脚本日志）"
+
       - name: Install auxiliary CLIs (gemini-cli/clawhub)
         # 2026-11-01：ZCode 数据还原已前移为「Restore ZCode data (先于 Tailscale 接入)」
         # （事故：后置还原会在运行中的 server 脚下换库，主人拍板还原先于 Tailscale）。
@@ -2056,6 +2189,9 @@ jobs:
         if: ${{ !cancelled() }}
         continue-on-error: true
         run: |
+          # 2026-11-10 Phase 1：继任轮等旧轮交出（其隧道已随网关同步停止）才起本侧
+          # connector —— 双 connector 会分流流量到已停服的旧 VM。serve 轮直通。
+          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/gate.sh" cutover || true
           mkdir -p ~/.openclaw/logs
 
           cloudflared tunnel route dns oc oc.'${{ secrets.VD }}'.eu.org || true
@@ -2090,6 +2226,9 @@ jobs:
           # 2026-11-06 启动提速（主人拍板）：健康后收尾并行化 ——
           # 本步整体后台起跑（rc/log/pid 契约），由「Start background archive loop」前的
           # 「Collect background post-health tasks」统一收口；脚本体零改动。
+          # 2026-11-10 Phase 1：继任轮先等旧轮最终归档（rsstt.tar.gz 上传完）再恢复，
+          # 保证订阅/推送游标零丢失；serve 轮直通。
+          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/gate.sh" archives_done || true
           _bg_tag="rss"
           rm -f "/tmp/post-health-${_bg_tag}.rc" "/tmp/post-health-${_bg_tag}.log" "/tmp/post-health-${_bg_tag}.pid"
           (
@@ -2252,6 +2391,8 @@ jobs:
           # 2026-11-06 启动提速（主人拍板）：健康后收尾并行化 ——
           # 本步整体后台起跑（rc/log/pid 契约），由「Start background archive loop」前的
           # 「Collect background post-health tasks」统一收口；脚本体零改动。
+          # 2026-11-10 Phase 1：继任轮等旧轮最终归档后起看板；serve 轮直通。
+          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/gate.sh" archives_done || true
           _bg_tag="quota"
           rm -f "/tmp/post-health-${_bg_tag}.rc" "/tmp/post-health-${_bg_tag}.log" "/tmp/post-health-${_bg_tag}.pid"
           (
@@ -2488,6 +2629,11 @@ jobs:
           # 时长由 tg_add_footer 内的 runner 开机时刻兜底
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          # 2026-11-10 Phase 1：继任轮等旧轮最终归档全部上传完（archives_done）才起
+          # 归档循环 —— 否则继任者的第一轮周期包会与旧轮的最终归档并发写同一个
+          # dropbox:self-hosted/openclaw.tar.gz（两台 VM 无共享 flock，会互相覆盖）。
+          # 旧轮死在归档中途时 gate 超时放行（降级，见 gate.sh 注）。
+          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/gate.sh" archives_done || true
           echo "Starting background archive tasks: archive ~/.openclaw every 20 minutes; OmniRoute data is archived periodically and at final shutdown..."
           cat > /tmp/create-openclaw-archive.sh <<'EOF'
           #!/usr/bin/env bash
@@ -4034,10 +4180,14 @@ jobs:
           # 账目：GitHub 单 job 硬上限 360m；准备相 8-14m + 写死 340m + 最终归档
           # 11-15m = 359-369m，准备相稍长就被平台强杀（conclusion=cancelled）：
           # 最终归档被砍、「Trigger next」不跑、tailscale post-logout 不跑 → 僵尸占名。
-          # 现改为死线 = 360 - 归档预算 20 - 安全余量 8 = 332 分钟（job 起点起算），
+          # 现改为死线 = 360 - 收尾预算 26 - 安全余量 8 = 326 分钟（job 起点起算），
           # 已耗多少睡多少；job 起点由 rclone-install 步骤写 /tmp/job-start-epoch。
+          # 2026-11-10 Phase 1：归档预算 20 → 26 —— 收尾段新增「等继任者 serving」
+          # 上限 15min（cutover.sh），与归档 ~8min + 通知接力 2m 相加的最坏账必须
+          # 仍落在硬上限内（326 + 收尾 timeout 30 + 2 = 358 < 360）。交接成功时
+          # 实际只用 ~8min（归档已移出关键路径），预算给的是 handoff 失败回退的坏账。
           HARD_LIMIT_MINUTES=360
-          FINAL_ARCHIVE_BUDGET_MINUTES=20
+          FINAL_ARCHIVE_BUDGET_MINUTES=26
           SAFETY_MARGIN_MINUTES=8
           DEADLINE_MINUTES=$((HARD_LIMIT_MINUTES - FINAL_ARCHIVE_BUDGET_MINUTES - SAFETY_MARGIN_MINUTES))
           # tr -dc '0-9'：文件存在但为空/含杂字符时兜底为 0，避免算术表达式炸掉步骤
@@ -4123,6 +4273,10 @@ jobs:
               kill "$(cat /tmp/openclaw-shutdown-warning.pid 2>/dev/null)" 2>/dev/null || true
               break
             fi
+            # 2026-11-10 Phase 1：交接 tick —— T-12min 触发继任者、T-4min 就绪看门狗。
+            # 幂等（tick.sh 内部状态文件），失败只告警不掀保活（死线照常走传统收尾）。
+            bash "$GITHUB_WORKSPACE/.github/scripts/handoff/tick.sh" "$((SLEEP_SECONDS - _waited))" \
+              || echo "::warning::[handoff-tick] tick 失败（忽略，传统收尾兜底）"
             sleep 15
             _waited=$((_waited + 15))
           done
@@ -4193,9 +4347,11 @@ jobs:
         # 批2 保留（OmniRoute 先停、上游并行停）：归档期上游仍在跑（只是聊天网关已关），
         # 避免上游空转；渠道不可用窗口从归档期全停的 ~12min 收敛为 2.5 停机瞬间。
         # 阶段标签沿用历史编号（1 空缺，停网关现为 2.5，原「7.」已删除），保跨轮 grep 习惯。
-        # 兜底超时：动态死线 332m + 本步 24m + 通知/接力 ~2m = 358m < 360m 硬上限，
+        # 兜底超时：动态死线 326m + 本步 30m + 通知/接力 ~2m = 358m < 360m 硬上限
+        #（2026-11-10 Phase 1：24→30m，多出的 6m 给「等继任者 serving」的上限 15m
+        #  与归档 ~8m 相加的最坏账；交接成功时实际 ~8m 就能收完）
         # 卡死时走本超时干净失败（post 步骤仍会跑），而不是被平台 6h 强杀
-        timeout-minutes: 24
+        timeout-minutes: 30
         env:
           # send_archive_alert 同上：未注入时约 15 处最终归档告警静默不发
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -4473,6 +4629,17 @@ jobs:
           phase0_measure >"$PHASE0_LOG" 2>&1 &
           PHASE0_PID=$!
           echo "🔬 [phase0] 交接可行性埋点已后台开跑（pid ${PHASE0_PID}，日志 ${PHASE0_LOG}）"
+
+          # ── Phase 1 交接（2026-11-10）：继任者就位的话，此刻交出 ──
+          # 位置在「2.5 网关停稳」之后：checkpoint → 停隧道 → rsync 只读源 →
+          # handing_over → 等 serving（≤15min）。成功 = 下线窗口就此关闭（继任者已在
+          # 服务），本步后续的最终归档降级为纯灾备备份、不再阻塞任何用户；失败 =
+          # handoff_aborted，行为与旧版传统收尾逐字节一致（归档 + Trigger next）。
+          # 返回 1 含「未武装」的常态（cron 兜底轮/手动轮没有继任者），不算失败。
+          HANDOFF_DONE=0
+          if bash "$GITHUB_WORKSPACE/.github/scripts/handoff/cutover.sh"; then
+            HANDOFF_DONE=1
+          fi
 
           # 用法与版式同 send_telegram_alert（<对象> <结论> <原因> [原始输出]）；
           # 两个函数分处不同 step、无法共享定义，改版式时两处要一起改
@@ -5224,6 +5391,11 @@ jobs:
             record_archive_result "zcode2api-data.tar.gz" skip 0 "本轮未部署"
           fi
 
+          # 2026-11-10 Phase 1：至此本轮全部归档对象（主包/zcode/OmniRoute/rsstt/
+          # zcode2api-data）都已落 Dropbox —— 推进 old.json 到 archives_done，
+          # 放行继任者的上游/归档循环闸门。legacy 轮也写（幂等，无继任者时无人消费）。
+          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/mark-archives-done.sh" || true
+
           # Phase 0 收口：等埋点跑完并把结果打进本 step 日志（否则只留在 /tmp，随 VM 回收消失）。
           # 与阶段A归档并行，正常早已结束，wait 不额外耗时；失败只告警不掀桌。
           if [ -n "${PHASE0_PID:-}" ]; then
@@ -5239,6 +5411,11 @@ jobs:
           # 活树执行的那份（关键文件隔离快照/keep-dir 回填/体积门等防线同源）。2026-11-02
           # A1 反转后最终归档在网关已停的静树上执行 —— 比「网关运行中打包」一致性更好
           # （state sqlite/-wal 不再是活体快照），脚本本身零改动。
+
+          # 2026-11-10 Phase 1：交接结果外抛（Trigger next 据此跳过 —— 继任者已在跑，
+          # 再触发一个就是给 guard 添堵）。预检失败等提前 exit 的路径不写 output，
+          # Trigger next 侧读到空值按「未交接」处理，行为与旧版一致。
+          echo "handoff_done=${HANDOFF_DONE:-0}" >> "$GITHUB_OUTPUT"
 
       # 最终归档结果汇总（规范 · 结果通知）：归档步骤边归档边把结果写进 /tmp 的结果文件，
       # 这里统一渲染成一条通知。单独成 step 而不是并进归档步骤——归档步骤多处 exit 1
@@ -5343,7 +5520,9 @@ jobs:
           fi
 
       - name: Trigger next OpenClaw run
-        if: ${{ always() && steps.keepalive.conclusion == 'success' && steps.install_openclaw.outcome == 'success' && steps.run_openclaw.outcome == 'success' }}
+        # 2026-11-10 Phase 1：handoff_done=1 时继任者已在跑（serving 回执触发过），
+        # 此处再触发只会多一个被 guard 自我取消的空轮 —— 跳过。
+        if: ${{ always() && steps.keepalive.conclusion == 'success' && steps.install_openclaw.outcome == 'success' && steps.run_openclaw.outcome == 'success' && steps.final_archive.outputs.handoff_done != '1' }}
         env:
           GH_TOKEN: ${{ github.token }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

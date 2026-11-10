@@ -8,10 +8,39 @@
 | 项 | 值 |
 |---|---|
 | 触发 | 定时 `cron: "*/5 * * * *"` + `workflow_dispatch`（手动） |
-| 并发 | `concurrency: openclaw-singleton` —— 同时只跑一个 run |
-| 单轮时长 | `Keep alive` 340 分钟；结束前 15 分钟推送「即将进入最终归档」预警 |
-| 自我接力 | 末尾 `Trigger next OpenClaw run`：`gh workflow run openclaw.yml`（仅 keepalive 成功时触发） |
+| 并发 | 动态并发组（2026-11-10 Phase 1）：serving 主轮独占 `openclaw-serve`；交接继任轮用 `openclaw-handoff-<run_id>` 专属键与旧轮**合法并存**；cron 兜底轮启动时经 `handoff/guard.sh` 自检，发现并存 run 即自我取消让位 |
+| 单轮时长 | `Keep alive` 死线 = 360 − 收尾预算 26 − 安全余量 8 = **326 分钟**（job 起点起算）；结束前 15 分钟推送「即将进入最终归档」预警、前 2 分钟推送停机倒计时 |
+| 自我接力 | 双通道（2026-11-10 Phase 1）：主路径 = 死线前 T-12min 由 `handoff/tick.sh` 触发**交接继任者**（warm standby），继任者接管成功后旧轮 `Trigger next` 跳过；兜底 = 继任者未就绪/交接失败时沿用末尾 `Trigger next OpenClaw run` 传统接力 |
 | 权限 | `contents: read` + `actions: write`（自我触发需要） |
+
+### warm-standby 交接（Phase 1，2026-11-10）
+
+目的：把每轮 6h 交班的下线时长从实测 466s 压到 ~2-3min，**数据零丢失**为硬约束。
+协议真源：`.github/scripts/handoff/protocol.sh`（标记 schema、状态机、防双服三件套都在文件头注释里）。
+
+```
+旧轮(serving)                          继任轮(openclaw-next, T-12min 被触发)
+  │ Keep alive T-12min: tick.sh 触发  ──→  启动段照常：基座恢复(≤20min 前周期包)
+  │ T-4min: 看门狗，未 ready 则取消继任者      → new.json=ready
+  │ 死线 T0: 停网关 → sqlite checkpoint
+  │          → 停本机隧道 → rsync 只读源
+  │          → old.json=handing_over   ──→  等到交出：rsync 增量直传(~/.openclaw ∥ ~/.zcode)
+  │                                        → 主 state 库 quick_check → rsync_done
+  │                                        → 起网关 → new.json=serving
+  │ 等 serving(≤15min) ←──────────────────┘
+  ├─ 成功: old.json=handoff_done → 最终归档降级为纯备份(移出关键路径) → 跳过 Trigger next
+  └─ 失败: old.json=handoff_aborted → 传统收尾(归档+Trigger next)，继任者自我取消
+```
+
+- **零丢失边界**：停机瞬间 = 网关 stop；rsync 在停机后进行，停机前写入全部随增量到达
+  继任者。rsync 失败/超时 → 传统收尾兜底（归档里也全有），任何分支不丢窗口。
+- **继任者的上游/AI 网关**：各数据恢复脚本无条件从 Dropbox 归档拉取，故等
+  `old.json=archives_done`（旧轮最终归档上传完，`gate.sh` 阻塞）才起服务 ——
+  模型通道 T0+6~10min 恢复（与旧版整条黑 ~8min 持平），网关/UI/Tailscale 先亮。
+- **归档循环**：继任者同样等 archives_done 才启动（防两台 VM 并发写同一个云包）。
+- **可观测性**：Phase 0 埋点在每轮收尾日志输出 `[phase0]` 段（增量字节/文件数/直连评估），
+  用于校准 rsync 增量交接的实际收益。
+
 
 ### 步骤顺序
 

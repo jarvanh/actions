@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# 继任者步骤闸门（Phase 1，2026-11-10）。
+# 用法: gate.sh cutover|archives_done   （调用处写 `|| true`，本脚本恒 exit 0）
+#   serve 轮：直通（传统启动时序一个字节都不动）。
+#   交接轮：  等旧轮 old.json 达到指定状态才放行 ——
+#     cutover       隧道已随网关交出（Cloudflared Tunnel 步等这个，避免双 connector 分流）
+#     archives_done 旧轮最终归档全部上传完成（上游/rsstt/归档循环等这个，
+#                   保证从「旧轮的最终数据」起服务，而不是 20min 前的基座）
+# 放行结果缓存（/tmp/openclaw-handoff/gate-<state>-passed），后续调用零开销。
+# 超时 = 旧轮半路死了：放行 + ::warning::（用基座数据续命是比卡死更好的降级，
+# 上游数据此刻无写入方，不存在丢失，只是旧）。
+set -uo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=protocol.sh
+source "$here/protocol.sh"
+handoff_init
+handoff_is_successor || exit 0
+
+need="${1:-archives_done}"
+PASS_FILE="$HANDOFF_STATE_DIR/gate-$need-passed"
+[ -f "$PASS_FILE" ] && exit 0
+
+# 接管失败/自我放弃已在途：垫 45s 等取消落地，期间绝不放行服务启动
+if [ -f "$HANDOFF_STATE_DIR/aborted" ]; then
+  echo "🛑 [gate:$need] 接管已放弃，等待 run 取消落地…"
+  sleep 45
+  exit 0
+fi
+
+wait_state="$need"
+case "$need" in
+  cutover)       wait_sec=${HANDOFF_CUTOVER_WAIT_SEC} ;;
+  archives_done) wait_sec=${HANDOFF_ARCHIVES_WAIT_SEC} ;;
+  *) echo "[gate:$need] 未知闸门，直接放行"; exit 0 ;;
+esac
+
+for _i in $(seq 1 $(( wait_sec / 5 ))); do
+  _st="$(handoff_old_state "${HANDOFF_OF}")"
+  case "$need" in
+    cutover)
+      case "$_st" in handing_over|handoff_done|archives_done) : > "$PASS_FILE"; exit 0 ;; esac
+      ;;
+    archives_done)
+      case "$_st" in archives_done) : > "$PASS_FILE"; exit 0 ;; handoff_aborted) : > "$PASS_FILE"; exit 0 ;; esac
+      ;;
+  esac
+  sleep 5
+done
+echo "::warning::[gate:$need] 等旧轮 state=$wait_state 超时（${wait_sec}s，实际=${_st:-<无标记>}）—— 放行，用基座数据降级续命"
+: > "$PASS_FILE"
+exit 0

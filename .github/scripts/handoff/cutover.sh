@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# 旧轮交出（teardown 在「2.5 网关停稳」之后调用；Phase 1，2026-11-10）。
+#
+# 时序（本脚本运行期间服务下线中，每一步都在压缩 T0→新网关就绪的窗口）：
+#   1. sqlite wal_checkpoint(TRUNCATE)  —— 把 -wal 并回主库，rsync 单文件一致快照
+#   2. 停本机 cloudflared 隧道          —— 公网入口与网关同步死亡，继任者接管后自起
+#   3. 起 rsync 只读 daemon             —— 绑 tailscale IP（公网不可达），绕开
+#                                          Dropbox 单流 13MB/s 的上传天花板
+#   4. old.json=handing_over → 等 new.json=serving（≤15min）
+# 成功 → handoff_done：调用方跳过「Trigger next」（继任者已在跑），最终归档降级为
+#        纯灾备备份、彻底移出关键路径（此时继任者已在服务，旧轮慢慢传）。
+# 失败 → handoff_aborted：调用方走传统收尾（含归档+Trigger next）；继任者读到
+#        该标记即自我放弃，不会出现双服。
+# 返回 0=交接成功；1=未尝试或失败（调用方两种都走传统收尾）。
+set -uo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=protocol.sh
+source "$here/protocol.sh"
+handoff_init
+
+SID_FILE="$HANDOFF_STATE_DIR/successor-run-id"
+ENABLED="$HANDOFF_STATE_DIR/enabled"
+RSYNCD_CONF="/tmp/rsyncd-handoff.conf"
+RSYNCD_PID="/tmp/rsyncd-handoff.pid"
+
+stop_rsyncd() {
+  if [ -f "$RSYNCD_PID" ]; then
+    kill "$(cat "$RSYNCD_PID" 2>/dev/null | tr -dc '0-9')" 2>/dev/null || true
+    rm -f "$RSYNCD_PID"
+  fi
+  pkill -f "rsyncd-handoff.conf" 2>/dev/null || true
+}
+
+abort_handoff() { # <原因>
+  echo "⛔ [cutover] 交接失败：$1 → 回退传统收尾（归档+Trigger next）"
+  handoff_put "$HANDOFF_OLD_REMOTE" "$(handoff_old_json handoff_aborted "${SID:-0}" "${TS_IP:-}" "${CUTOVER_TS:-0}" "${BASE_MARKER:-0}")"
+  stop_rsyncd
+  exit 1
+}
+
+# ── 0. 预检：必须已武装，且继任者存活 ──
+[ -f "$ENABLED" ] && [ -f "$SID_FILE" ] || { echo "ℹ️ [cutover] 未武装交接，走传统收尾"; exit 1; }
+SID="$(cat "$SID_FILE" 2>/dev/null | tr -dc '0-9')"
+[ -n "$SID" ] || abort_handoff "继任者 run id 缺失"
+case "$(handoff_run_status "$SID")" in
+  completed|failure|cancelled) abort_handoff "继任者 run=$SID 已终止" ;;
+esac
+
+TS_IP="$(tailscale ip -4 2>/dev/null | head -n 1 | tr -d '[:space:]')"
+[ -n "$TS_IP" ] || abort_handoff "拿不到本机 tailscale IP"
+CUTOVER_TS=$(date +%s)
+BASE_MARKER="$(cat /tmp/openclaw-archive-marker.openclaw 2>/dev/null | tr -dc '0-9')"
+BASE_MARKER="${BASE_MARKER:-0}"
+
+# ── 0.5 继任者未就绪就到了死线（优雅重启早于 T-12min 触发等）：最多再等 5min ──
+_ns="$(handoff_new_state "$SID")"
+if ! printf '%s' "$_ns" | grep -qE '^(ready|rsync_started|rsync_done|serving)$'; then
+  echo "⏳ [cutover] 继任者尚未 ready（state=${_ns:-<无标记>}），最多再等 5min…"
+  _ok=0
+  for _i in $(seq 1 60); do
+    _ns="$(handoff_new_state "$SID")"
+    if printf '%s' "$_ns" | grep -qE '^(ready|rsync_started|rsync_done|serving)$'; then _ok=1; break; fi
+    case "$(handoff_run_status "$SID")" in completed|failure|cancelled) break ;; esac
+    sleep 5
+  done
+  [ "$_ok" = "1" ] || abort_handoff "继任者 5min 内未就绪"
+fi
+
+# ── 1. sqlite checkpoint：网关已停、写入方清零，-wal 并回主库 ──
+# 用 timeout 兜底：checkpoint 卡住不能拖死整个交出（rsync 照传 wal 文件，只是多搬一点）
+_checkpoint_db() {
+  local db="$1"
+  [ -f "$db" ] || return 0
+  timeout 30 sqlite3 "$db" 'PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null 2>&1 \
+    || echo "⚠️ [cutover] checkpoint 失败（继续，rsync 会连 wal 一起传）: $db"
+}
+_checkpoint_db "$HOME/.openclaw/state/openclaw.sqlite"
+for _db in "$HOME"/.openclaw/agents/*/agent/openclaw.sqlite; do
+  [ -e "$_db" ] || continue
+  _checkpoint_db "$_db"
+done
+# zcode 侧：只处理存在非空 -wal 的库（写入方为 openclaw 拉起的 zcode 工具进程，网关停即静默）
+while IFS= read -r _db; do
+  [ -n "$_db" ] || continue
+  _checkpoint_db "$_db"
+done < <(find "$HOME/.zcode" -name '*.sqlite-wal' -size +0c -printf '%h\n' 2>/dev/null \
+  | sed 's/-wal$//' | sort -u)
+echo "✅ [cutover] sqlite checkpoint 完成"
+
+# ── 2. 停本机隧道（oc=聊天公网入口 / qb=quota-board 面板），继任者接管后自起 ──
+sudo systemctl stop cftun-oc.service cftun-qb.service 2>/dev/null || true
+echo "✅ [cutover] 本机 cloudflared 隧道已停"
+
+# ── 3. rsync 只读 daemon（绑 tailscale IP；模块 oc/zc 分别映射两个状态树）──
+cat > "$RSYNCD_CONF" <<EOF_RSYNC
+port = ${HANDOFF_RSYNC_PORT}
+address = ${TS_IP}
+pid file = ${RSYNCD_PID}
+log file = /tmp/rsyncd-handoff.log
+use chroot = no
+[oc]
+    path = ${HOME}/.openclaw
+    read only = yes
+    comment = openclaw state (handoff source)
+[zc]
+    path = ${HOME}/.zcode
+    read only = yes
+    comment = zcode state (handoff source)
+EOF_RSYNC
+rsync --daemon --config="$RSYNCD_CONF" 2>/dev/null || true
+# daemon fork 后子进程绑定有亚秒级延迟，轮询等它。⚠️ 锚点用 [[:space:]] 而非 $：
+# ss 输出是「LISTEN 0 5 127.0.0.1:8730 0.0.0.0:*」，本地地址列在行中间，
+# 用 8730$ 锚行尾恒不匹配（合成测试实测：daemon 已监听但检查恒假）。
+_listen_ok=0
+for _i in $(seq 1 20); do
+  if ss -tln 2>/dev/null | grep -qE "[:.]${HANDOFF_RSYNC_PORT}([[:space:]]|\$)"; then _listen_ok=1; break; fi
+  sleep 0.5
+done
+[ "$_listen_ok" = "1" ] \
+  || abort_handoff "rsync daemon 未监听 ${HANDOFF_RSYNC_PORT}（日志: $(tail -n 3 /tmp/rsyncd-handoff.log 2>/dev/null | tr '\n' ' '))"
+echo "✅ [cutover] rsync 源就绪（${TS_IP}:${HANDOFF_RSYNC_PORT}，只读，仅 tailnet 可达）"
+
+# ── 4. 交出标记 → 等 serving ──
+handoff_put "$HANDOFF_OLD_REMOTE" "$(handoff_old_json handing_over "$SID" "$TS_IP" "$CUTOVER_TS" "$BASE_MARKER")"
+echo "🤝 [cutover] 已交出（handing_over），等继任者 serving（≤${HANDOFF_SERVING_WAIT_SEC}s）…"
+_chk=0
+for _i in $(seq 1 $(( HANDOFF_SERVING_WAIT_SEC / 5 ))); do
+  _ns="$(handoff_new_state "$SID")"
+  case "$_ns" in
+    serving)
+      handoff_put "$HANDOFF_OLD_REMOTE" "$(handoff_old_json handoff_done "$SID" "$TS_IP" "$CUTOVER_TS" "$BASE_MARKER")"
+      stop_rsyncd
+      echo "🎉 [cutover] 继任者已 serving → handoff_done（本轮回退为纯备份收尾，不再 Trigger next）"
+      exit 0
+      ;;
+  esac
+  _chk=$((_chk + 1))
+  if [ $((_chk % 12)) -eq 0 ]; then   # 每 60s 看一眼继任者死活
+    case "$(handoff_run_status "$SID")" in
+      completed|failure|cancelled) abort_handoff "等待期间继任者 run=$SID 终止（state=${_ns:-<无标记>}）" ;;
+    esac
+  fi
+  sleep 5
+done
+abort_handoff "等 serving 超时（${HANDOFF_SERVING_WAIT_SEC}s，state=${_ns:-<无标记>}）"
