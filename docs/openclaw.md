@@ -50,7 +50,7 @@
 | rclone-install / rclone-config | 挂载 Dropbox 的前提 | — |
 | Prefetch cold artifacts（后台并行） | 把与本轮状态无关的大块下载丢到后台：主包 `openclaw.tar.gz`（9.3GB / 实测 54s）+ 三个固定 tag 的网关镜像（omniroute 35.7s、rss-to-telegram ~20s、qoder2api-hub），与挂载 / Tailscale / 装 OpenClaw / 解包重叠。产物先写 `.part` 再 mv、`rc` 文件最后落，消费方读不到半截；**纯增益**，预取失败或没跑完，消费方按原路自己下载 | `/tmp/openclaw-prefetch/` |
 | Mount Dropbox | `rclone mount dropbox: /dropbox`（**runner 身份挂载**：root 挂载会在 token 刷新时把 conf 改成 root:600，导致后续上传 EACCES）；VFS 上限 2G、`--attr-timeout 1m`、`--poll-interval 0` | `/dropbox`，日志 `/opt/logs/rclone-dropbox.log` |
-| Install OpenClaw | `install.sh --no-onboard` → 恢复 `~/.openclaw`（等 prefetch 收尾 → **单趟**解包 + 盘上判据）→ `npm i -g @google/gemini-cli clawhub` | `~/.openclaw` |
+| Install OpenClaw | `install.sh --no-onboard` → 恢复 `~/.openclaw`（等 prefetch 收尾 → **单趟**解包 + 盘上判据）→ `npm i -g clawhub` | `~/.openclaw` |
 | Restore skill symlink for proactivity | proactivity 真实状态落 `~/.openclaw/workspace/skills-data/proactivity`，`~/proactivity` 只是兼容软链 | — |
 | Setup / Enable Tailscale | ephemeral 节点、固定主机名 `openclaw`、开启 SSH 与 Exit Node | `ssh runner@openclaw` |
 | Prepare runtime env | 生成 `~/runtime-env.sh` 并设为 `BASH_ENV`：加载 `~/.openclaw/.env`、继承 runner add_path、本地化 gh/git 认证 | — |
@@ -220,7 +220,7 @@
   步骤移到 Seed identity 之后、所有 Tailscale 步骤之前，rclone-install/config 一并前移；
   还原后 server 首次打开的就是最终数据，不存在脚下换库。zcode.tar.gz 因此退出 Prefetch
   （消费方已前移，Prefetch 收口等待反而拉长接入前延迟），改同步下载。原位置只剩
-  `Install auxiliary CLIs`（gemini-cli/clawhub），护栏不变。
+  `Install auxiliary CLIs`（clawhub），护栏不变。
   > 客户端此前若已按别的身份确认过「作为新设备」，修复后首次连接可能仍需确认一次；
   > 此后 id 恒定，不再复发。
 - **SQLite 取一致性快照**：`db.sqlite` 与 `tasks-index.sqlite` 用 `sqlite3 .backup` 从活库

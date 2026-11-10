@@ -107,7 +107,7 @@ Telegram 收到，放弃重试只会让凭据彻底丢失。
 | 🚨 OmniRoute 归档恢复失败 · 空库兜底 | `run-ai-gateway.sh` | Dropbox 归档存在但本轮恢复未走通、已 bootstrap 空库（P0 数据事故信号） | alert |
 | 📊 workbuddy-gateway 模型倍率 · 模型数量 N | `run-workbuddy.sh` | 独立第二条通知（非就绪通知分节），自带标题 + `<pre>` 倍率表；发送失败只 `::warning::` 留痕 | alert |
 | AI 网关用量报告 | `openclaw.yml`（`board.py usage-report` 生成正文） | 用量报告 step，标题与内容由看板真源给出（仓库内无标题字面量）。口径见 3.6 节 | 普通 |
-| ⚠️ ZCode 数据提前恢复失败 / ⚠️ 辅助 CLI 安装失败 | `openclaw.yml` | zcode.tar.gz 下载/校验失败或 rclone 不可用（提前恢复步）；gemini-cli/clawhub npm 安装失败 | alert |
+| ⚠️ ZCode 数据提前恢复失败 / ⚠️ 辅助 CLI 安装失败 | `openclaw.yml` | zcode.tar.gz 下载/校验失败或 rclone 不可用（提前恢复步）；clawhub npm 安装失败 | alert |
 | 🚨 vaultwarden 数据恢复失败 | `p.yml` | Dropbox 备份缺 `db.sqlite3`：本轮终止、不启动空库、不回传（防空库覆盖远端好数据） | alert |
 | 🚨 Dropbox 挂载失败 | `openclaw.yml`（Mount Dropbox） | 挂载失败先发告警（附日志尾部 1200 字节）再 `exit 1`，不带病跑整轮 | alert |
 | 🚨 OpenClaw 自愈失败 | `openclaw.yml` | 主步骤失败，推失败阶段 / 版本 / 关键日志 | alert |

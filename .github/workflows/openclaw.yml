@@ -2139,11 +2139,12 @@ jobs:
           bash -eo pipefail "$OC_DIR/run-ai-gateway.sh" \
             || echo "::warning::[post-cutover] run-ai-gateway 返回非零（降级链已尽力，详见脚本日志）"
 
-      - name: Install auxiliary CLIs (gemini-cli/clawhub)
+      - name: Install auxiliary CLIs (clawhub)
         # 2026-11-01：ZCode 数据还原已前移为「Restore ZCode data (先于 Tailscale 接入)」
         # （事故：后置还原会在运行中的 server 脚下换库，主人拍板还原先于 Tailscale）。
         # 本步只剩与 ZCode 数据无关的辅助 CLI 安装，原位置与护栏不变：
-        # continue-on-error 不级联；CLIs 缺了技能降级 —— 失败必须出声（TG alert）。
+        # 2026-11-10：按主人要求取消 gemini-cli 安装，本步只装 clawhub。
+        # continue-on-error 不级联；CLI 缺了技能降级 —— 失败必须出声（TG alert）。
         if: ${{ !cancelled() }}
         continue-on-error: true
         env:
@@ -2165,23 +2166,20 @@ jobs:
                 local msg="" reason="${1:-安装失败}"
                 tg_add_title msg "⚠️ 辅助 CLI 安装失败"
                 tg_add_kv msg "原因" "$reason"
-                tg_add_kv msg "影响" "gemini-cli/clawhub 未装，相关技能降级；网关与 ZCode 数据不受影响"
+                tg_add_kv msg "影响" "clawhub 未装，相关技能降级；网关与 ZCode 数据不受影响"
                 tg_add_path msg "Run" "$TG_RUN_URL"
                 tg_add_footer msg
                 send_tg "$msg" alert || true
               }
-              (
-                npm i -g @google/gemini-cli
-                npm i -g clawhub
-              ) > /tmp/aux-cli-install.log 2>&1 &
+              npm i -g clawhub > /tmp/aux-cli-install.log 2>&1 &
               AUX_NPM_PID=$!
               # 收口：GH 会回收 step 的子进程，npm 后台任务必须在本步骤结束前 wait
               if wait "$AUX_NPM_PID"; then
-                echo "✅ 辅助 CLI 安装完成（gemini-cli / clawhub）"
+                echo "✅ 辅助 CLI 安装完成（clawhub）"
               else
-                echo "::warning::辅助 CLI 安装失败（gemini-cli / clawhub），日志尾部："
+                echo "::warning::辅助 CLI 安装失败（clawhub），日志尾部："
                 tail -n 20 /tmp/aux-cli-install.log 2>/dev/null || true
-                aux_fail_notify "gemini-cli/clawhub npm 安装失败"
+                aux_fail_notify "clawhub npm 安装失败"
                 exit 1
               fi
             )
