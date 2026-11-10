@@ -387,7 +387,7 @@ def download_speedtest(urls, proxy_env, timeout=30.0, size_hint_mib=10, window_s
         proxy = f'http://127.0.0.1:{MIHOMO_MIXED_PORT}'
     else:
         proxy = (proxy_env.get('HTTP_PROXY') or proxy_env.get('HTTPS_PROXY') or '').strip()
-    cap_bytes = int(size_hint_mb * 1024 * 1024) if False else int(size_hint_mib * 1024 * 1024)
+    cap_bytes = int(size_hint_mib * 1024 * 1024)
     # `window_seconds<=0` 退回**旧定长行为**：要求拉满上界（截断即算失败）。这样文档里
     # 「≤0 退回旧定长」与代码一致，出问题时有一个已知可用的逃生阀。
     fixed_length = not (window_seconds and window_seconds > 0)
@@ -1191,6 +1191,9 @@ def to_gist_result_row(r):
         'upload_mibs': ul if isinstance(ul, (int, float)) else 0,
         'latency_ms': lat if isinstance(lat, (int, float)) else 0,
         'ok': bool(r.get('ok')),
+        # bypass 一并投影（2026-11-10，与 taier 对齐）：共享层据此过滤
+        # 「出口 IP == runner 直连」的不可信读数，不依赖上游是否已置 ok=False。
+        'bypass': bool(r.get('bypass')),
     }
 
 

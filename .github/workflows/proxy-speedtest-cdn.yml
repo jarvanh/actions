@@ -189,7 +189,13 @@ jobs:
           PROXY_SPEEDTEST_UPLOAD_VIA_PROXY: '1'
           GITEE_PRIVATE_TOKEN: ${{ secrets.GITEE_PRIVATE_TOKEN }}
           PROXY_SPEEDTEST_GITEE_OWNER: ${{ secrets.PROXY_SPEEDTEST_GITEE_OWNER }}
-          PROXY_SPEEDTEST_GITEE_REPO: proxy-speedtest-temp
+          # ⚠️ CDN 用**自己的**仓库（2026-11-10 隔离）：此前与 proxy-speedtest-gitee 共用
+          # `proxy-speedtest-temp` + 同一分支 master，而两边定时点只差 1 小时、单轮跑
+          # 3~3.5 小时 ⇒ 实际并发 force-push 同一分支，日志里已有
+          # `! [remote rejected] ... (shallow update not allowed)`，且会把对方的 blob
+          # 变成自己 push 的 delta base（上传读数的真假因此混合、事后无法分辨）。
+          # 仓库不存在时会由 ensure_gitee_remote 自动创建（私有）。
+          PROXY_SPEEDTEST_GITEE_REPO: proxy-speedtest-temp-cdn
           PROXY_SPEEDTEST_PUSH_TIMEOUT: '30'
           # runner 直连基线（**不是**家庭宽带对照，2026-09-17 与 gitee 统一）：不经代理 push 一次，
           # 给出「runner 直连 vs 节点」的可比数字——只看节点带宽无法判断节点是否还不如直连。

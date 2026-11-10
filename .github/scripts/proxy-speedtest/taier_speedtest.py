@@ -22,11 +22,11 @@
     （mihomo 收尾仍调幂等的 stop_mihomo_tun，防止内核残留占端口）
 """
 import html
+import hashlib
 import json
 import os
 import pathlib
 import re
-import shutil
 import signal
 import subprocess
 import time
@@ -87,7 +87,24 @@ from speedtest_gitee import (
 # 配置（全部可经环境变量覆盖）
 # ---------------------------------------------------------------------------
 TAIER_REPO = (os.environ.get('TAIER_REPO') or 'MiaM1ku/taierspeedtest').strip() or 'MiaM1ku/taierspeedtest'
-TAIER_RELEASE_API = f'https://api.github.com/repos/{TAIER_REPO}/releases/latest'
+# 引擎版本 pin（2026-11-10）：读数口径是**引擎实现的一部分**（jh.13 双槽流水线、
+# jh.15 滑窗估值、jh.16 回归斜率）。跟着 `releases/latest` 走等于「上游某天发版 ⇒
+# 同一套订阅的新旧读数不可比，且没有任何告警」——旧注释写 jh.15、线上已是 jh.16
+# 就是漂移的现场。
+# 默认只对 **fork**（TAIER_REPO 含 jarvanh）钉 jh.16：上游 MiaM1ku 没有 jh.* tag，
+# 对它 pin 会直接 404。`TAIER_VERSION=''`（显式设空）= 退回 latest，作为逃生阀；
+# 不设该变量时按仓库决定默认值（不能用 `or` 兜底，否则「显式空」与「未设」分不开）。
+if 'TAIER_VERSION' in os.environ:
+    TAIER_VERSION = os.environ.get('TAIER_VERSION', '').strip()
+elif 'jarvanh' in TAIER_REPO.lower():
+    TAIER_VERSION = 'v1.0.4-jh.16'
+else:
+    TAIER_VERSION = ''
+TAIER_RELEASE_API = (
+    f'https://api.github.com/repos/{TAIER_REPO}/releases/tags/{TAIER_VERSION}'
+    if TAIER_VERSION else
+    f'https://api.github.com/repos/{TAIER_REPO}/releases/latest'
+)
 TAIER = HOME_RUNTIME / 'taierspeedtest'
 TAIER_LOG = HOME_RUNTIME / 'taier_speedtest.log'
 RESULT_JSON = HOME_RUNTIME / 'taier_speedtest_result.json'
@@ -107,11 +124,14 @@ CONFIG = {
     # 默认 single（单连接流水线）：2026-10-11 定案——单流读数贴近真实体验（本机直连
     # 同一广州联通测速点实测：single 117~156Mbps vs multi×8 聚合 887~1143Mbps，聚合
     # 值是「满血突发」口径，single 才是「用起来」的口径）。multi/both 可显式选。
-    # 上行口径（引擎 v1.0.4-jh.13/14 双槽流水线；jh.15 起 8s 滑动窗口估值）：
+    # ⚠️ 口径澄清（2026-11-10，勿再按「单连接」理解上行）：single 只把**下行**压到
+    # 1 条连接；**上行仍是引擎的双槽流水线**（2 个在途 8MiB POST、两个 enqueue 会话），
+    # 所以 up 是「2 流聚合」的持续吞吐，不是单流读数。要严格单流上行须显式设
+    # `TAIER_UPLOAD_PIPELINE=0`（代价：每 8MiB 等一次确认，跨洋链路会系统性低估）。
+    # 上行估值（引擎 v1.0.4-jh.13/14 双槽流水线；jh.15 滑窗；jh.16 回归斜率）：
     # 双槽维持 2 个在途 POST，槽 A 等确认的空转期由槽 B 填满 → 计数连续、
-    # 读数 = 链路持续满窗容量（实测确认字节较单槽翻倍）；估值端 jh.15 以
-    # 「累计字节差 ÷ 真实经过时长」取 median，修掉「请求完成周期 × 500ms 采样格」
-    # 相位锁的量化残余（旧每格增量会锁 67.11/100.66/134.22，最坏把好链路读成 0）。
+    # 读数 = 链路持续满窗容量；计数点仍在 body.Read()（TCP 反压），且只留服务端
+    # 确认过的字节（`[debug-ul-ack] ratio`），不引入虚高。
     # 要测多会话聚合吞吐选 multi（实测 up 峰值 4→268 / 8→706 / 16→1785 Mbps，
     # up>0 率 8 连接最优 96%）。
     # 订阅判定联动：上行「≥10兆」大多达标；达标不足时自动回退 download
@@ -347,12 +367,16 @@ def _github_json(url: str):
 
 
 def ensure_local_taier():
-    """下载 taierspeedtest 最新 Release 二进制（固定文件名）。
+    """下载 taierspeedtest 二进制（**钉版本**，固定文件名）。
 
-    缓存判据 = meta 文件记录的 `repo|tag` 与 TAIER_REPO 的 latest 一致。
+    缓存判据 = meta 文件记录的 `repo|tag` 与 `TAIER_RELEASE_API` 解析出的 tag 一致。
     为什么必须做：HOME_RUNTIME 里的旧缓存可能是 MiaM1ku 原版引擎（无代理支持），
     TAIER_REPO 切到 fork 后若直接复用缓存，会静默跑旧引擎、读数照旧虚高——
     这比下载失败隐蔽得多，必须有版本对账。
+
+    2026-11-10 补：版本 pin 在 `TAIER_VERSION`（默认 v1.0.4-jh.16），不再跟 latest；
+    下载后按 GitHub API 给出的 asset `digest`（sha256:…）校验，不一致即删文件报错
+    （防截断/中间人；API 没给 digest 时记 `sha256_verified=false`，不阻断）。
     """
     arch = 'arm64' if os.uname().machine in ('aarch64', 'arm64') else 'amd64'
     asset = f'taierspeedtest-linux-{arch}'
@@ -374,18 +398,39 @@ def ensure_local_taier():
     if TAIER.exists() and os.access(TAIER, os.X_OK) and have == want:
         VERSION['taier'] = tag
         return TAIER
-    url = ''
+    url, digest = '', ''
     for a in data.get('assets') or []:
         if a.get('name') == asset:
             url = str(a.get('browser_download_url') or '')
+            digest = str(a.get('digest') or '')
     if not url:
-        raise RuntimeError(f'{asset} not found in {TAIER_REPO} latest release')
+        raise RuntimeError(
+            f'{asset} not found in {TAIER_REPO} release {TAIER_VERSION or "latest"}')
+    h = hashlib.sha256()
     with urllib.request.urlopen(url, timeout=180) as r, TAIER.open('wb') as f:
-        shutil.copyfileobj(r, f)
+        while True:
+            chunk = r.read(256 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+            f.write(chunk)
+    verified = False
+    if digest.lower().startswith('sha256:'):
+        want_hex = digest.split(':', 1)[1].strip().lower()
+        got = h.hexdigest()
+        if got != want_hex:
+            try:
+                TAIER.unlink()
+            except OSError:
+                pass
+            raise RuntimeError(
+                f'taierspeedtest 校验失败（{tag}/{asset}）：sha256 got={got} want={want_hex}')
+        verified = True
     os.chmod(TAIER, 0o755)
     meta_path.write_text(want, encoding='utf-8')
     VERSION['taier'] = tag
-    log_progress('taier_downloaded', tag=tag, asset=asset, path=str(TAIER))
+    log_progress('taier_downloaded', tag=tag, asset=asset, path=str(TAIER),
+                 sha256_verified=verified)
     return TAIER
 
 
@@ -568,6 +613,9 @@ def to_gist_result_row(r):
         'upload_mibs': (r.get('up') or 0) / 8.388608,
         'latency_ms': _rtt_to_ms(r.get('rtt')),
         'ok': bool(r.get('ok')),
+        # bypass 必须一并投影（2026-11-10）：共享层据此过滤「流量没进节点」的读数。
+        # 只靠 ok 也够，但两处都带才不会被将来的调用方绕过。
+        'bypass': bool(r.get('bypass')),
     }
 
 
@@ -1144,8 +1192,15 @@ def _run():
         row['bypass'] = bool(direct_ip and parsed['exit_ip'] and parsed['exit_ip'] == direct_ip)
         if row['bypass']:
             bypass_hits += 1
+            # 与 cdn/gitee 对齐（2026-11-10 修）：旧实现只打 bypass 标记、`ok` 仍为
+            # True，而投影层 `to_gist_result_row` 又不带该字段 ⇒ 这些「其实是直连
+            # 测出来的」节点仍可能按达标进订阅。判失败是唯一不会漏的口径。
+            row['ok'] = False
         if not row['ok']:
-            if parsed['region'] and not has_speed:
+            if row['bypass']:
+                row['error'] = (f'疑似未走代理：出口 IP 与 runner 直连出口相同'
+                                f'（{direct_ip}），测速流量未进节点')
+            elif parsed['region'] and not has_speed:
                 row['error'] = f"连不上测速点 {parsed['region']}（延迟/上下行全空）"
             else:
                 tail = (err or out or '').strip().splitlines()

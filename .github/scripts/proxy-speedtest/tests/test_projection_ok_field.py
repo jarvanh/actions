@@ -151,6 +151,20 @@ def main():
     check(T.to_gist_result_row({'name': 'x', 'ok': False, 'up': 50, 'down': 50})['ok'] is False,
           'ok=False 同样透传（不是恒 True 的假修）')
 
+    # ── 6. bypass 必须贯穿投影层（2026-11-10）：taier 旧形态只挂 bypass、ok 仍 True ──
+    print('== 6. bypass 投影 + 判定（taier 旧形态 ok=True/bypass=True 不得进订阅）==')
+    bypass_row = T.to_gist_result_row({
+        'name': 'BP-1', 'ok': True, 'bypass': True, 'up': 120.0, 'down': 60.0,
+        'rtt': '200ms', 'source_entry': {'proxy': dict(proxy, name='BP-1')},
+    })
+    check('bypass' in bypass_row, f"taier 投影含 'bypass' 键（实际 {sorted(bypass_row)}）")
+    check(bypass_row['bypass'] is True, 'bypass=True 透传（不被投影层丢掉）')
+    check(C.count_qualified_nodes([bypass_row], 'upload', 10) == 0,
+          'bypass 节点即使 ok=True / 速度达标也不计入')
+    b6 = C.build_subscription_bundle([bypass_row], pol_min1)
+    check(b6['qualified'] == 0 and not (b6['text'] or '').strip(),
+          f'bypass 节点不产出订阅（实际 qualified={b6["qualified"]}）')
+
     print()
     if FAILURES:
         print(f'FAILED: {len(FAILURES)} 项未通过')

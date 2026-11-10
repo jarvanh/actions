@@ -367,6 +367,9 @@ def count_qualified_nodes(results: list, metric: str, min_megabit):
     return sum(
         1 for item in results
         if item.get('ok', False)
+        # bypass 显式排除（2026-11-10）：taier 的投影现在已置 ok=False，但历史结果 /
+        # 其它调用方可能只带标记。共享层是最后一道闸，不能只信上游的 ok。
+        and not item.get('bypass')
         and get_item_megabits(item, mode) >= int(min_megabit)
         and node_proxy_config(item)
     )
@@ -456,7 +459,8 @@ def build_mihomo_yaml_text(results: list, speedtest_mode: str, min_megabit: int 
     for item in results:
         # ⚠️ 与 count_qualified_nodes 同口径：失败节点（含 bypass 未走代理）不带进
         # 订阅，否则「可用 0 个」的一轮仍会导出 N 个「达标」节点（2026-10-12 修）。
-        if not item.get('ok', False):
+        # bypass 不论 ok 如何一律排除（2026-11-10 补，见 count_qualified_nodes）。
+        if not item.get('ok', False) or item.get('bypass'):
             continue
         if get_item_megabits(item, speedtest_mode) < int(min_megabit):
             continue

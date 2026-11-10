@@ -167,6 +167,17 @@ def main():
     check(b7c['qualified'] == 0 and not b7c['text'].strip(),
           f'全失败一轮不产出订阅（实际 qualified={b7c["qualified"]}, text空={not b7c["text"].strip()}）')
 
+    print('== 7d. bypass 标记优先于 ok —— taier 旧形态（ok 仍 True）（2026-11-10 修）==')
+    # taier 曾只挂 `bypass: True` 而不改 `ok`（cdn/gitee 是置 ok=False）。投影层若照抄
+    # ok=True，这些「流量其实走了 runner 直连」的读数就会达标进订阅。共享层现在
+    # 不看 ok、只看 bypass 也会挡掉（双保险）。
+    bypass_rows = [dict(orch_node(100.0, 100.0, ok=True), bypass=True) for _ in range(5)]
+    check(C.count_qualified_nodes(bypass_rows, 'upload', 10) == 0,
+          f'ok=True 但 bypass=True 不计达标（实际 {C.count_qualified_nodes(bypass_rows, "upload", 10)}）')
+    b7d = C.build_subscription_bundle(bypass_rows, dict(pol, min_nodes=1))
+    check(b7d['qualified'] == 0 and not b7d['text'].strip(),
+          f'bypass 节点不产出订阅（实际 qualified={b7d["qualified"]}, text空={not b7d["text"].strip()}）')
+
     print('== 8. source_entry.proxy 优先于 proxy_obj（前者是更权威的来源）==')
     both = {'name': 'n',
             'source_entry': {'proxy': {'type': 'trojan', 'server': 'from-entry.com', 'port': 443}},
