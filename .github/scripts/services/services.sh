@@ -466,7 +466,7 @@ Type=simple
 #    date +%Y%m%d-%H%M%S 会被逐段吃掉（实测生成 /tmp/dropbox-orphan- 空后缀）。
 #    因此下面所有**字面百分号**都要写成 %%；%h（家目录）是故意保留的 specifier。
 ExecStartPre=+/bin/sh -c 'grep -q "^user_allow_other" /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null'
-ExecStartPre=+/bin/sh -c 'grep -qF "-> /dropbox/" /etc/apparmor.d/local/fusermount3 2>/dev/null || { printf "%%s\n" "mount fstype=@{fuse_types} options=(nosuid,nodev) options in (ro,rw,noatime,dirsync,nodiratime,noexec,sync) -> /dropbox/{,**/}," "umount /dropbox/{,**/}," | sudo tee -a /etc/apparmor.d/local/fusermount3 >/dev/null; sudo apparmor_parser -r /etc/apparmor.d/fusermount3 2>/dev/null || true; }'
+ExecStartPre=+/bin/sh -c 'grep -qF -- "-> /dropbox/" /etc/apparmor.d/local/fusermount3 2>/dev/null || { printf "%%s\n" "mount fstype=@{fuse_types} options=(nosuid,nodev) options in (ro,rw,noatime,dirsync,nodiratime,noexec,sync) -> /dropbox/{,**/}," "umount /dropbox/{,**/}," | sudo tee -a /etc/apparmor.d/local/fusermount3 >/dev/null; sudo apparmor_parser -r /etc/apparmor.d/fusermount3 2>/dev/null || true; }'
 ExecStartPre=-/usr/bin/fusermount3 -uz /dropbox
 ExecStartPre=+/bin/sh -c 'mountpoint -q /dropbox && exit 0; [ -z "\$(ls -A /dropbox 2>/dev/null)" ] && exit 0; d=/tmp/dropbox-orphan-\$(date +%%Y%%m%%d-%%H%%M%%S); mkdir -p "\$d"; find /dropbox -mindepth 1 -maxdepth 1 -exec mv -t "\$d" {} + 2>/dev/null || true; logger -t rclone-dropbox "挂载点非空，残留已移至 \$d"'
 # 参数画像："配置 / Docker 数据卷"——小文件随机读写，不需要大块顺序预读。

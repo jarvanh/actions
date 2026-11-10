@@ -15,7 +15,11 @@ ensure_fuse_apparmor() {
 
   local changed=0 mp
   for mp in "$@"; do
-    if ! grep -qF "${mp}/" /etc/apparmor.d/local/fusermount3 2>/dev/null; then
+    # 判据必须与 services.sh 里 rclone-dropbox 的 ExecStartPre 一致：
+    # 只认规则行的挂载目标 "-> <mp>/"，避免两边判据不同各写一份（2026-11-10
+    # 实测 /dropbox 规则被写了两次）。
+    # 注意 --：模式以 "-" 开头，不加 -- 会被 grep 当成选项（invalid option -- '>'）
+    if ! grep -qF -- "-> ${mp}/" /etc/apparmor.d/local/fusermount3 2>/dev/null; then
       sudo mkdir -p /etc/apparmor.d/local
       printf '%s\n' \
         "mount fstype=@{fuse_types} options=(nosuid,nodev) options in (ro,rw,noatime,dirsync,nodiratime,noexec,sync) -> ${mp}/{,**/}," \
