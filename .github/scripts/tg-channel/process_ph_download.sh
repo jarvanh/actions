@@ -76,7 +76,13 @@ if [ -n "$SOFTWARE_CREATED_AT" ] && [ "$SOFTWARE_CREATED_AT" != "0" ]; then
 else
   SOURCE_CREATED_ISO=""
 fi
-if bash ${GITHUB_WORKSPACE}/.github/scripts/tg-channel/transcode_and_send.sh "${FILEPATH}" "${TELEGRAM_CHANNEL_ID}" "ph"; then
+# caption 第三行展示时间（东八区）；取不到时回退到 ISO 原值
+CAPTION_MODTIME=""
+if [ -n "$SOFTWARE_MODIFIED_AT" ] && [ "$SOFTWARE_MODIFIED_AT" != "0" ]; then
+  CAPTION_MODTIME=$(TZ=Asia/Shanghai date -d "@${SOFTWARE_MODIFIED_AT}" '+%Y-%m-%d %H:%M' 2>/dev/null || true)
+fi
+[ -n "$CAPTION_MODTIME" ] || CAPTION_MODTIME="${SOURCE_MODIFIED_ISO:-未知}"
+if bash ${GITHUB_WORKSPACE}/.github/scripts/tg-channel/transcode_and_send.sh "${FILEPATH}" "${TELEGRAM_CHANNEL_ID}" "${CAPTION_MODTIME}"; then
   python3 "${GITHUB_WORKSPACE}/.github/scripts/tg-channel/add_uploaded_video.py" \
     "${TARGET_DIR}/uploaded_videos.json" \
     "${FILENAME}" \

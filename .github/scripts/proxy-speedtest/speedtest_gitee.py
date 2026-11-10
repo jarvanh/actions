@@ -1138,7 +1138,7 @@ def git_prepare_work_repo(repo_dir: pathlib.Path, remote: str, env, branch_name:
     """准备**只含本次待传文件**的空仓库（不 clone 远端）。
 
     为什么不再 clone（2026-11-10 修）：上传测速只需要「把这份文件推上去」，
-    远端历史与工作区内容一概不用。旧实现 `git clone --depth 1 --branch <b>`
+    远端历史与工作区内容一概不用。旧实现 `git clone --depth 1 --branch <branch>`
     带来三个纯负债：
 
       1. **每个节点白下载 10MiB**：clone 段不参与计时，却真实走节点链路，
@@ -1768,7 +1768,7 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
     build_node_metric_prefix 渲染，未测出的指标整项省略）。
     Push 目标 / runner 直连基线等诊断信息保留在 RESULT_JSON，不再进通知。
     """
-    # 展示时间统一东八区（规范 5.3）；duration 仍用原始时间戳计算
+    # 展示时间统一东八区（规范 · 日期与相对时间）；duration 仍用原始时间戳计算
     started_text = tg_format_time_bj(started_at)
     ended_text = tg_format_time_bj(ended_at)
     # 通知行耗时用中文三段式（与全库时长格式统一，勿出现 5h57m）；

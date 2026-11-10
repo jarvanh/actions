@@ -900,7 +900,7 @@ restore_try_run() {
   _tryr_log "  ✅ 全程只读: 未写入/移动/删除任何源端与目标端数据"
 
   # ---- Telegram 汇总 ----
-  # 说人话原则（规范 · 1.5）: 这条通知的读者不是实现者 —— 读者做判断用的字段全部
+  # 说人话原则（规范 · 说人话）: 这条通知的读者不是实现者 —— 读者做判断用的字段全部
   #   用日常说法；实现层术语（move/noop/split 分类、marker、翻案、Q3、artifact）
   #   留在运行日志与 tryrun.tsv。翻译的是词，不是口径：数字与条件分支原样保留。
   if [ "${TRYRUN_SEND_TG:-1}" = "1" ]; then
@@ -914,7 +914,7 @@ restore_try_run() {
     # 时间窗决定样本大小，缺了它 "缺失 30" 和 "缺失 777" 会被当成同一个问题
     if [ "$cutoff" -gt 0 ]; then
       tg_add_kv msg "时间范围" "最近 ${within_days} 天（跳过超窗 ${skipped_old} 份）"
-      [ -n "$since_raw" ] && tg_add_kv msg "时间下界" "${since_raw}"
+      [ -n "$since_raw" ] && tg_add_path msg "时间下界" "${since_raw}"
     fi
     [ "$ts_fallback" -eq 1 ] && tg_add_kv msg "时间范围" "❌ 未生效（取不到文件时间）⇒ 已回退为全部"
     if [ "${TRYRUN_CHECK_EXISTS:-1}" = "1" ] && [ "$total" -gt 0 ]; then

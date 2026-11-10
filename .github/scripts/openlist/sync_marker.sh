@@ -1515,7 +1515,7 @@ send_sync_skipped() {
   tg_add_path msg "目标" "$dest_path"
   tg_add_section msg "🗓 上次同步"
   # ISO 原始戳人性化（2026-09-05T11:34:19Z → 2026-09-05 19:34（东八区）），
-  # 展示时间统一东八区（规范 5.3）；解析失败保留原值；
+  # 展示时间统一东八区（规范 · 日期与相对时间）；解析失败保留原值；
   # "距今"并作同行的 " · N 小时前"，少一行 kv
   local _last_fmt
   _last_fmt=$(TZ=Asia/Shanghai date -d "${MARKER_LAST_SUCCESS}" '+%Y-%m-%d %H:%M（东八区）' 2>/dev/null || echo "${MARKER_LAST_SUCCESS}")

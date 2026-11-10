@@ -813,7 +813,7 @@ def tg_format_elapsed(seconds):
 
 
 def tg_format_time_bj(value, fmt='%Y-%m-%d %H:%M:%S'):
-    """机器时间 → 东八区展示时间（规范 · 5.3：通知展示时间一律东八区）。
+    """机器时间 → 东八区展示时间（规范 · 日期与相对时间：通知展示时间一律东八区）。
 
     value 支持 ISO 串（含 T / Z）或 epoch 秒；naive 值按**运行机器本地时区**
     解释，因此 GitHub runner（UTC）与本机（CST）都对。

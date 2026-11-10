@@ -98,7 +98,7 @@ tree_code_fold <多行裸文本> [上限=8]          # 转义 + <code> + 截断
 
 **大小**：1024 进制 + 三位小数 + IEC 单位 → `1.150 GiB` / `800 MiB`。bash 侧唯一实现是通知真源 `tg_notify.sh` 的 `format_bytes`，source 真源后直接用；python 侧仍有两处同义实现（`add_uploaded_video.py`、`sync_to_tg.sh` 内嵌段），改口径时要同步。**不要用 `du -h` 的 `1G`，也不要输出裸字节。**
 
-**日期**：`YYYY-MM-DD HH:MM UTC` + ` · N 小时前`（解析失败保留原值）。
+**日期**：`YYYY-MM-DD HH:MM（东八区）` + ` · N 小时前`（解析失败保留原值）。展示时间一律东八区，机器值仍存 UTC。
 
 **计数**：分节 ` · N`；中文化错误码写「退出码 45」而不是 `exit=45`。
 

@@ -36,7 +36,10 @@ import shlex
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+
+# 展示时间统一东八区（规范 · 日期与相对时间）；机器值仍用 UTC
+CST = timezone(timedelta(hours=8))
 
 
 SOURCE_REMOTE = sys.argv[1]
@@ -457,12 +460,14 @@ def main():
     failed_list = []
 
     for modtime, file, size in pending:
-        # 将 ISO 8601 modtime 格式化为更易读的本地样式
+        # 将 ISO 8601 modtime 转成东八区展示时间（规范 · 日期与相对时间）
         modtime_display = modtime
         if modtime:
             try:
                 dt = datetime.fromisoformat(modtime.replace("Z", "+00:00"))
-                modtime_display = dt.strftime("%Y-%m-%d %H:%M:%S")
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                modtime_display = dt.astimezone(CST).strftime("%Y-%m-%d %H:%M")
             except Exception:
                 pass
 

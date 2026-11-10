@@ -148,7 +148,8 @@ Telegram 收到，放弃重试只会让凭据彻底丢失。
 ### 1.7 媒体 caption（特殊形态）
 
 随视频发出的 caption：**没有标题、分隔线、收尾区**（收尾区唯一固有例外），拼完即随
-媒体发出。分片场景中间行换 `part N/M (大小)`，仍三行。不走 sendMessage 发送层，但
+媒体发出。三行依次为文件名 / 大小 / 修改时间（东八区）；分片场景中间行换
+`part N/M (大小)`，仍三行。不走 sendMessage 发送层，但
 必须转义并显式 HTML parse_mode，429 重试同口径（最多 5 次）。实现：
 `tg_send_video.py`（Telethon）、`sync_notify.sh` sendDocument（重试 5 次）。
 

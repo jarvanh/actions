@@ -1224,7 +1224,7 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None,
     ok_results = [r for r in results if r.get('ok')]
     top_results = sorted(ok_results, key=sort_key, reverse=True)
 
-    # 展示时间统一东八区（规范 5.3）；meta 里原值仍是 UTC 机器值，勿改
+    # 展示时间统一东八区（规范 · 日期与相对时间）；meta 里原值仍是 UTC 机器值，勿改
     started = tg_format_time_bj(meta.get('started_at', ''))
     ended = tg_format_time_bj(meta.get('ended_at', ''))
     try:

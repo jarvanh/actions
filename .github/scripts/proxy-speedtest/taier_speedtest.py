@@ -806,14 +806,14 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     # ⚠️ 这一行是 2026-09-14 补的：上面的注释与下面的 f-string 早就在了，**赋值行却漏了**，
     # 于是标题一渲染就 `NameError: name '_title_emoji' is not defined`，整条通知发不出去
     # （`telegram_send_failed`，而 job 照样「成功」——通知失败不改 exit code，所以静默了）。
-    # 判据与注释、规范（台账 1.6：0 成功 / 疑似未走代理降级 ⚠️）一致。
+    # 判据与注释、台账 1.6（0 成功 / 疑似未走代理降级 ⚠️）一致。
     _title_emoji = '⚠️' if (not ok_results or bypass_hits or aborted_due_to_runtime) else '✅'
     _label = (merged_env().get('PROXY_SPEEDTEST_LABEL') or '').strip()
     _title_prefix = f'{_label} · ' if _label else ''
     lines = [
         f'{_title_emoji} {_title_prefix}泰尔三网测速',
         sep,
-        # 展示时间统一东八区（规范 5.3）；meta 里的 started_text/ended_text 是机器值，勿改
+        # 展示时间统一东八区（规范 · 日期与相对时间）；meta 里的 started_text/ended_text 是机器值，勿改
         f"🗓 起止：{esc(tg_format_time_bj(meta['started_text']))} ~ {esc(tg_format_time_bj(meta['ended_text']))}（东八区） · 耗时 {esc(meta['duration_text'])}",
         # 计数口径与 cdn/gitee 统一用「可用」（成功=功能可用，含节点连接成功但速度偏低）
         f"📊 节点：共 {len(results)} 个 · 可用 {len(ok_results)} 个",

@@ -22,6 +22,7 @@
 | 12 | **函数体内 `source` 真源** | `source .*tg_notify\.sh`，人工判断是否落在 `name() { … }` 之间 | 只允许在 step 顶层 / heredoc 脚本顶层。函数体在子 shell 里跑时，函数内 `source` 不影响父 shell 函数表，会把调用点对 `send_tg` 的本地覆写还原掉，`local` 也失效（规范 · 通知函数的正确接法） |
 | 13 | 接力轮重复通知 | 长跑 workflow 里按「服务已就绪」判据发通知的调用点 | 用 `/tmp` 标记文件区分首轮/接力轮，接力轮只记日志；否则每个接力 run 重复推同一条（规范 · 通知函数的正确接法） |
 | 14 | `🕒` 误用 | `🕒` | 只允许出现在无 run 上下文的常驻服务收尾区（`health/system_health.sh`、`board.py`、`gateway-watchdog.py`）；正文分节/时间行不得使用 |
+| 15 | 展示时间时区 | 通知字符串里的 `UTC`；无 `TZ=` 的 `date +%F` | 展示时间一律东八区（`YYYY-MM-DD HH:MM（东八区）`）；仅机器值（marker/JSON/日志/run 时间戳）可 UTC。取展示值必须 `TZ=Asia/Shanghai` |
 
 ## 2. 四域判据（派 worker 时写进 prompt 的摘要）
 
@@ -37,6 +38,7 @@
 - `tree_code_fold` 收裸文本、`tree_fold` 收已构建条目流，误用会二次转义
 - 收尾区 `⏱ 已运行 X · 🔗 运行日志` 必须走 `tg_add_footer` / `Get-TgFooter` / `tg_footer_line`
 - 时长五层：`X 小时 Y 分`（分钟不补零）/ `X 分钟` / `X.XX 秒` / `X 毫秒` / 面板 `⏱mm:ss`
+- 展示时间一律东八区（`YYYY-MM-DD HH:MM（东八区）`）；机器值仍存 UTC，两者不混用
 - 动态内容必须转义，无豁免
 - 读者要「看懂」的字段说人话（规范 · 说人话）：失败原因/状态/结论里的内部机制
   （熔断、探测、哈希目录、base64URL、重启复核）一律翻译成日常说法；运行日志不搬进

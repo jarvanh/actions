@@ -2008,10 +2008,9 @@ jobs:
               restore_rev_time=$(grep '^OPENCLAW_RESTORE_REV_TIME=' /tmp/openclaw-restore-meta.env | tail -n 1 | cut -d= -f2- || true)
             fi
             if [ -n "$restore_rev_time" ]; then
-              _restore_local=$(TZ=Asia/Shanghai date -d "$restore_rev_time" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || true)
-              _restore_utc=$(TZ=UTC date -d "$restore_rev_time" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || true)
-              if [ -n "$_restore_local" ] && [ -n "$_restore_utc" ]; then
-                restore_time_display="${_restore_local}（UTC+8） · ${_restore_utc} UTC"
+              _restore_local=$(TZ=Asia/Shanghai date -d "$restore_rev_time" '+%Y-%m-%d %H:%M' 2>/dev/null || true)
+              if [ -n "$_restore_local" ]; then
+                restore_time_display="${_restore_local}（东八区）"
               else
                 restore_time_display="$restore_rev_time"
               fi
@@ -2484,15 +2483,13 @@ jobs:
           RESTORE_REV=""
           RESTORE_REV_TIME=""
           RESTORE_REV_TIME_LOCAL=""
-          RESTORE_REV_TIME_UTC=""
           if [ -f /tmp/openclaw-restore-meta.env ]; then
             RESTORE_SOURCE=$(grep '^OPENCLAW_RESTORE_SOURCE=' /tmp/openclaw-restore-meta.env | tail -n 1 | cut -d= -f2- || true)
             RESTORE_REV=$(grep '^OPENCLAW_RESTORE_REV=' /tmp/openclaw-restore-meta.env | tail -n 1 | cut -d= -f2- || true)
             RESTORE_REV_TIME=$(grep '^OPENCLAW_RESTORE_REV_TIME=' /tmp/openclaw-restore-meta.env | tail -n 1 | cut -d= -f2- || true)
           fi
           if [ -n "$RESTORE_REV_TIME" ]; then
-            RESTORE_REV_TIME_LOCAL=$(TZ=Asia/Shanghai date -d "$RESTORE_REV_TIME" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || true)
-            RESTORE_REV_TIME_UTC=$(TZ=UTC date -d "$RESTORE_REV_TIME" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || true)
+            RESTORE_REV_TIME_LOCAL=$(TZ=Asia/Shanghai date -d "$RESTORE_REV_TIME" '+%Y-%m-%d %H:%M' 2>/dev/null || true)
           fi
 
           # 统一 HTML 通知 + 统一收尾区（tg_notify.sh，checkout 后可用）。
@@ -2547,12 +2544,12 @@ jobs:
           if [ -n "$AI_FALLBACK_REASON" ]; then
             tg_add_note msg "回退原因：${AI_FALLBACK_REASON}"
           fi
-          # 用了历史 revision 才提示（主包正常时不制造噪音）；同时给出 UTC+8 与 UTC，
-          # 方便对照 run 时间与 Dropbox 版本时间。
+          # 用了历史 revision 才提示（主包正常时不制造噪音）；展示时间统一东八区
+          # （规范 · 日期与相对时间）。
           if [ "$RESTORE_SOURCE" = "revision" ]; then
             _rev_time_display="${RESTORE_REV_TIME:-未知}"
-            if [ -n "$RESTORE_REV_TIME_LOCAL" ] && [ -n "$RESTORE_REV_TIME_UTC" ]; then
-              _rev_time_display="${RESTORE_REV_TIME_LOCAL}（UTC+8） · ${RESTORE_REV_TIME_UTC} UTC"
+            if [ -n "$RESTORE_REV_TIME_LOCAL" ]; then
+              _rev_time_display="${RESTORE_REV_TIME_LOCAL}（东八区）"
             fi
             _entries="来源：<code>历史 revision $(escape_html "${RESTORE_REV:-未知}")</code>"
             _entries+=$'\n'"创建时间：<code>$(escape_html "${_rev_time_display}")</code>"
