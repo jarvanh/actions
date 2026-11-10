@@ -26,20 +26,47 @@ exec >>/tmp/handoff-ai-fetch.log 2>&1
 echo "[$(date '+%F %T')] ai-fetch pid=$$ src=${1:-?}"
 echo "[$(date '+%F %T')] ai-fetch start (src ${OLD_TS_IP}:${HANDOFF_RSYNC_PORT})"
 
-for _i in $(seq 1 36); do   # 最多 180s：旧轮要先停 AI 栈再打包上传
+OMNI_VOL="${OMNIROUTE_VOLUME:-omniroute_omniroute-data}"
+OMNI_IMG="${OMNIROUTE_IMAGE:-diegosouzapw/omniroute:latest}"
+DEB_DIR="$HOME/omniroute"
+
+# ── Phase 2b 快路径：取「裸卷 dump」并装进同名卷 ──
+# 旧轮在交出瞬间停 AI 栈后直接 tar 卷（不做 VACUUM/压缩，10-20s 完成），
+# 这里 rsync 直取（540MB，实测 88-150MB/s）+ 解包进卷，全程 ~15-30s。
+# 一致性：旧轮容器已停，卷是静树 → 裸 dump 与 VACUUM 快照等价。
+for _i in $(seq 1 36); do   # 最多 180s
   if timeout 120 rsync -a --timeout=60 \
       "rsync://${OLD_TS_IP}:${HANDOFF_RSYNC_PORT}/ai/" "$AI_PAYLOAD_DIR/" >/dev/null 2>&1 \
-     && [ -s "$AI_PAYLOAD_DIR/OmniRoute.tar.gz" ]; then
-    if tar -tzf "$AI_PAYLOAD_DIR/OmniRoute.tar.gz" >/dev/null 2>&1; then
-      mv -f "$AI_PAYLOAD_DIR/OmniRoute.tar.gz" "$PF_DIR/OmniRoute.tar.gz"
-      echo 0 > "$PF_DIR/omniroute-tar.rc"
-      echo 999999 > "$PF_DIR/omniroute-tar.pid"   # 死 pid：fetch 侧不等，直接读 rc
-      echo "⚡ [ai-fetch] 直取成功（$(du -h "$PF_DIR/OmniRoute.tar.gz" | awk '{print $1}')）—— AI 栈跳过多余下载"
+     && [ -f "$AI_PAYLOAD_DIR/dump.rc" ]; then
+    if [ "$(cat "$AI_PAYLOAD_DIR/dump.rc" 2>/dev/null)" != "0" ] \
+       || [ ! -s "$AI_PAYLOAD_DIR/omnivol.tar" ] || [ ! -s "$AI_PAYLOAD_DIR/omnideploy.tar" ]; then
+      echo "⚠️ [ai-fetch] 旧轮 dump 失败（rc=$(cat "$AI_PAYLOAD_DIR/dump.rc" 2>/dev/null)），走 Dropbox 回退"
+      break
+    fi
+    # 校验 tar 完整性（截断包绝不装载）
+    if ! tar tf "$AI_PAYLOAD_DIR/omnivol.tar" >/dev/null 2>&1 \
+       || ! tar tf "$AI_PAYLOAD_DIR/omnideploy.tar" >/dev/null 2>&1; then
+      echo "⚠️ [ai-fetch] dump 包校验不过（第 ${_i} 次）"
+      sleep 5; continue
+    fi
+    # ① 部署目录（compose + .env）：让 run-ai-gateway 的 restore 走「已就绪」短路
+    mkdir -p "$DEB_DIR"
+    if ! tar xf "$AI_PAYLOAD_DIR/omnideploy.tar" -C "$DEB_DIR" 2>/dev/null; then
+      echo "⚠️ [ai-fetch] 部署目录解包失败，走 Dropbox 回退"; break
+    fi
+    # ② 装载命名卷
+    docker volume create "$OMNI_VOL" >/dev/null 2>&1 || true
+    if docker run --rm --user root -v "${OMNI_VOL}:/target" -v "$AI_PAYLOAD_DIR:/src:ro" "$OMNI_IMG" \
+         sh -c 'nice -n 19 ionice -c3 tar xf /src/omnivol.tar -C /target' >/dev/null 2>&1 \
+       && docker run --rm --user root -v "${OMNI_VOL}:/data:ro" "$OMNI_IMG" \
+            sh -c 'test -s /data/storage.sqlite -o -s /data/server.env' >/dev/null 2>&1; then
+      : > /tmp/handoff-ai-fast.ok
+      echo "⚡ [ai-fetch] 卷直装完成（$(du -h "$AI_PAYLOAD_DIR/omnivol.tar" | awk '{print $1}')）—— AI 栈走快路径，跳过 Dropbox"
       exit 0
     fi
-    echo "⚠️ [ai-fetch] tar 校验不过（第 ${_i} 次）"
+    echo "⚠️ [ai-fetch] 卷装载失败（第 ${_i} 次）"
   fi
   sleep 5
 done
-echo "ℹ️ [ai-fetch] 未取到 AI 整包 —— AI 栈走 Dropbox 归档（Phase 1.5 行为）"
+echo "ℹ️ [ai-fetch] 快路径未就绪 —— AI 栈走 Dropbox 归档（Phase 1.5 行为）"
 exit 0

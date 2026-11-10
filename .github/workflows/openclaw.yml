@@ -2160,7 +2160,9 @@ jobs:
           # 因为这样看起来「从来没成功过」。
           echo "──── AI 整包直取结果 ────"
           tail -n 6 /tmp/handoff-ai-fetch.log 2>/dev/null || echo "（无 ai-fetch 日志）"
-          if [ -s /tmp/openclaw-prefetch/OmniRoute.tar.gz ]; then
+          if [ -f /tmp/handoff-ai-fast.ok ]; then
+            echo "✅ 快路径命中：OmniRoute 卷由 rsync 裸 dump 直装"
+          elif [ -s /tmp/openclaw-prefetch/OmniRoute.tar.gz ]; then
             echo "✅ 快路径命中：OmniRoute 整包来自 rsync 直传"
           else
             echo "ℹ️ 走 Dropbox 回退：OmniRoute 整包来自云端归档"

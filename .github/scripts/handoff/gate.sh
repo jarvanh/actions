@@ -49,6 +49,11 @@ for _i in $(seq 1 $(( wait_sec / 5 ))); do
       #   ① Phase 2 直取成功（ai-payload-fetch 已把整包播种进 prefetch 目录）
       #   ② Phase 1.5 的 Dropbox 快照完成（ai.json=done）—— 回退路径
       # 两条都指向「AI 数据已是旧轮停机后的状态」，零丢失口径不变。
+      # Phase 2b 快路径：继任者已把裸卷 dump 装进命名卷（本地标记）
+      if [ -f /tmp/handoff-ai-fast.ok ]; then
+        : > "$PASS_FILE"; exit 0
+      fi
+      # Phase 2 旧快路径（整包播种，保留兼容）
       if [ -s /tmp/openclaw-prefetch/OmniRoute.tar.gz ]; then
         : > "$PASS_FILE"; exit 0
       fi
