@@ -239,14 +239,15 @@ check_openlist_storage_health() {
     # 复用真源三段式时长（规范 · 时长 第 1–3 层），不再自写一份
     local dur_txt
     dur_txt="$(tg_format_duration "$dur")"
-    fs_txt=$(date -u -d "@${first_seen}" '+%Y-%m-%d %H:%M' 2>/dev/null) || fs_txt=""
+    # 展示时间统一东八区（规范 5.3）；first_seen 本身仍是 UTC epoch
+    fs_txt=$(TZ=Asia/Shanghai date -d "@${first_seen}" '+%Y-%m-%d %H:%M' 2>/dev/null) || fs_txt=""
     if [ -n "$fs_txt" ]; then
-      tg_add_kv msg "已持续" "${dur_txt}（首次发现 ${fs_txt} UTC）"
+      tg_add_kv msg "已持续" "${dur_txt}（首次发现 ${fs_txt}，东八区）"
     else
       tg_add_kv msg "已持续" "$dur_txt"
     fi
   else
-    tg_add_kv msg "首次发现" "$(date -u '+%Y-%m-%d %H:%M') UTC"
+    tg_add_kv msg "首次发现" "$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M（东八区）')"
   fi
 
   # 对象清单: 挂载名与驱动都是机器返回值 → <code>

@@ -1007,7 +1007,7 @@ jobs:
           tg_add_kv START_MSG "直链源" "$SRC_NAME"
           tg_add_kv START_MSG "网盘快捷方式" "$OD_LINE"
           tg_add_kv START_MSG "取链自检" "$MAP_CN"
-          tg_add_kv START_MSG "时间" "$(date -u '+%Y-%m-%d %H:%M UTC')"
+          tg_add_kv START_MSG "时间" "$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M（东八区）')"
           # 说明行（tg_add_note，段前空行）："网盘快捷方式"不是通用词，补一句人话解释
           tg_add_note START_MSG "网盘快捷方式 = 网盘里指向别处文件的 .url 文件；本服务会自动跟随它换成可直接播放的链接"
           tg_add_footer START_MSG
@@ -2908,7 +2908,7 @@ jobs:
           # 备份结果：运行期增量 + 收尾全量的最终结论（backup step 写入 /tmp/emby-backup-result）
           tg_add_kv msg "数据备份" "$(cat /tmp/emby-backup-result 2>/dev/null || echo 未知)"
           tg_add_kv msg "播放客户端" "$CLIENTS"
-          tg_add_kv msg "时间" "$(date -u '+%Y-%m-%d %H:%M UTC')"
+          tg_add_kv msg "时间" "$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M（东八区）')"
           # 说明行（tg_add_note，段前空行）：统计里的两个内部口径补一句人话
           if [ -n "$OD_NOTE" ]; then tg_add_note msg "$OD_NOTE"; fi
           # 统一收尾区（⏱ 已运行 X · 🔗 运行日志；读 step env 的 TG_RUN_URL，时长走开机时刻兜底）

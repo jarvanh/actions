@@ -66,6 +66,7 @@ from speedtest_common import (
     tg_entry_codes,
     tg_footer_line,
     tg_format_elapsed,
+    tg_format_time_bj,
     tg_pre_block,
     update_gist,
     TG_SEP,
@@ -1223,8 +1224,9 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None,
     ok_results = [r for r in results if r.get('ok')]
     top_results = sorted(ok_results, key=sort_key, reverse=True)
 
-    started = str(meta.get('started_at', ''))[:19].replace('T', ' ')
-    ended = str(meta.get('ended_at', ''))[:19].replace('T', ' ')
+    # 展示时间统一东八区（规范 5.3）；meta 里原值仍是 UTC 机器值，勿改
+    started = tg_format_time_bj(meta.get('started_at', ''))
+    ended = tg_format_time_bj(meta.get('ended_at', ''))
     try:
         duration_text = tg_format_elapsed(
             (datetime.fromisoformat(meta['ended_at']) - datetime.fromisoformat(meta['started_at'])).total_seconds())
@@ -1247,7 +1249,7 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None,
     lines = [
         f'{_title_emoji} {_title_prefix}CDN 测速完成',
         sep,
-        f'🗓 起止：{esc(started)} ~ {esc(ended)} · 耗时 {esc(duration_text)}',
+        f'🗓 起止：{esc(started)} ~ {esc(ended)}（东八区） · 耗时 {esc(duration_text)}',
         f'📊 节点：共 {len(results)} 个 · 可用 {len(ok_results)} 个',
         # 到点收摊：**不是失败**（退出码仍 0），但必须说清「本轮没测完」，否则读者会
         # 以为拿到的就是全部节点的结论

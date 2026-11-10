@@ -105,7 +105,9 @@ if [ -n "${HEALTH_SIMULATE_FAIL:-}" ]; then
   for _f in "${_sim[@]}"; do fails+=("❌ $_f"); done
 fi
 
-now=$(date -u '+%Y-%m-%d %H:%M UTC')
+# 展示时间统一东八区（AGENTS.md：时间一律东八区）。hosted runner 系统时区是 UTC，
+# date -u 直出会比北京时间早 8 小时，主人对不上。
+now=$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M（东八区）')
 signature=$(printf '%s\n' "${fails[@]:-}" | md5sum | cut -d' ' -f1)
 prev_sig=""; prev_at=0
 if [ -f "$STATE" ]; then

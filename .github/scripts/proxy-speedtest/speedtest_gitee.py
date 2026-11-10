@@ -60,7 +60,7 @@ from speedtest_common import (
     get_item_megabits, latency_probe, log_progress, merged_env,
     resolve_host_ipv4, resolve_subscription_policy,
     send_telegram, send_telegram_chunked, tg_entry, tg_entry_codes, tg_footer_line,
-    tg_format_elapsed, tg_pre_block, update_gist,
+    tg_format_elapsed, tg_format_time_bj, tg_pre_block, update_gist,
     # 到点收摊判据由共享层提供（四套测速同一份实现，避免各写一遍后漂移）
     should_stop_for_budget, speedtest_budget_deadline,
     TG_SEP,
@@ -1768,8 +1768,9 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
     build_node_metric_prefix 渲染，未测出的指标整项省略）。
     Push 目标 / runner 直连基线等诊断信息保留在 RESULT_JSON，不再进通知。
     """
-    started_text = str(started_at)[:19].replace('T', ' ')
-    ended_text = str(ended_at)[:19].replace('T', ' ')
+    # 展示时间统一东八区（规范 5.3）；duration 仍用原始时间戳计算
+    started_text = tg_format_time_bj(started_at)
+    ended_text = tg_format_time_bj(ended_at)
     # 通知行耗时用中文三段式（与全库时长格式统一，勿出现 5h57m）；
     # RESULT_JSON 的 duration_text 保持紧凑格式不变
     try:
@@ -1796,7 +1797,7 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
     summary_lines = [
         f'{_title_emoji} {_title_prefix}Gitee 测速完成',
         sep,
-        f'🗓 起止：{esc(started_text)} ~ {esc(ended_text)} · 耗时 {esc(duration_cn)}',
+        f'🗓 起止：{esc(started_text)} ~ {esc(ended_text)}（东八区） · 耗时 {esc(duration_cn)}',
         f'📊 节点：共 {len(speed_results)} 个 · 可用 {len(ok_results)} 个',
         # 到点收摊 / 运行中中止：**不是失败**（退出码仍 0），但必须说清「本轮没测完」。
         # 位置紧跟「📊 节点」：与 taier / CDN 两套一致（三套通知是同一份交付物，

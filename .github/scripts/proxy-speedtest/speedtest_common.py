@@ -29,7 +29,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import yaml
 
@@ -810,6 +810,27 @@ def tg_format_elapsed(seconds):
         return f'{m} 分钟'
     # 秒统一两位小数（与 bash/pwsh 真源及条目内单文件耗时同形态）
     return f'{s:.2f} 秒'
+
+
+def tg_format_time_bj(value, fmt='%Y-%m-%d %H:%M:%S'):
+    """机器时间 → 东八区展示时间（规范 · 5.3：通知展示时间一律东八区）。
+
+    value 支持 ISO 串（含 T / Z）或 epoch 秒；naive 值按**运行机器本地时区**
+    解释，因此 GitHub runner（UTC）与本机（CST）都对。
+    解析失败原样返回，不吞信息。机器值（JSON / marker / 日志）不要用本函数改写。
+    """
+    try:
+        if isinstance(value, (int, float)):
+            dt = datetime.fromtimestamp(value)
+        else:
+            raw = str(value)
+            try:
+                dt = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+            except ValueError:
+                dt = datetime.fromisoformat(raw[:19])
+        return dt.astimezone(timezone(timedelta(hours=8))).strftime(fmt)
+    except Exception:
+        return str(value)[:19].replace('T', ' ')
 
 
 def tg_entry(subject, *meta, code: bool = True):

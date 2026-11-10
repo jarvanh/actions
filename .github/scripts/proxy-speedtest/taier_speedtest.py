@@ -60,6 +60,7 @@ from speedtest_common import (
     tg_entry, tg_entry_codes,
     tg_footer_line,
     tg_format_elapsed,
+    tg_format_time_bj,
     tg_pre_block,
     update_gist,
     TG_SEP,
@@ -812,7 +813,8 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     lines = [
         f'{_title_emoji} {_title_prefix}泰尔三网测速',
         sep,
-        f"🗓 起止：{esc(meta['started_text'])} ~ {esc(meta['ended_text'])} · 耗时 {esc(meta['duration_text'])}",
+        # 展示时间统一东八区（规范 5.3）；meta 里的 started_text/ended_text 是机器值，勿改
+        f"🗓 起止：{esc(tg_format_time_bj(meta['started_text']))} ~ {esc(tg_format_time_bj(meta['ended_text']))}（东八区） · 耗时 {esc(meta['duration_text'])}",
         # 计数口径与 cdn/gitee 统一用「可用」（成功=功能可用，含节点连接成功但速度偏低）
         f"📊 节点：共 {len(results)} 个 · 可用 {len(ok_results)} 个",
         # 到点收摊 / 运行中中止：**不是失败**（退出码仍 0），但必须说清，否则读者会以为
