@@ -45,8 +45,13 @@ for _i in $(seq 1 $(( wait_sec / 5 ))); do
       case "$_st" in archives_done) : > "$PASS_FILE"; exit 0 ;; handoff_aborted) : > "$PASS_FILE"; exit 0 ;; esac
       ;;
     ai_archives_done)
-      # Phase 1.5：只等 AI 栈自己的快照（交出瞬间上传，与 rsync 并行），
-      # 不必等整段最终归档 —— 模型通道恢复时间从 ~8min 压到 ~1.5min。
+      # 两条路取先到者：
+      #   ① Phase 2 直取成功（ai-payload-fetch 已把整包播种进 prefetch 目录）
+      #   ② Phase 1.5 的 Dropbox 快照完成（ai.json=done）—— 回退路径
+      # 两条都指向「AI 数据已是旧轮停机后的状态」，零丢失口径不变。
+      if [ -s /tmp/openclaw-prefetch/OmniRoute.tar.gz ]; then
+        : > "$PASS_FILE"; exit 0
+      fi
       _ai="$(handoff_ai_state "${HANDOFF_OF}")"
       case "$_ai" in done) : > "$PASS_FILE"; exit 0 ;; esac
       ;;

@@ -2138,6 +2138,11 @@ jobs:
           # 内部自带 P5b 等齐门，会等上面六个 rc 就绪）
           bash -eo pipefail "$OC_DIR/run-ai-gateway.sh" \
             || echo "::warning::[post-cutover] run-ai-gateway 返回非零（降级链已尽力，详见脚本日志）"
+          # 2026-11-10（主人定口径）：整体上线 = 所有服务都能正常使用，而不是
+          # 「聊天网关起来了」。逐个探活本地端口，等齐才算，并把相对旧轮停机时刻
+          # 的下线秒数打进日志（生产每轮都会有一条 ★ 整体上线）。
+          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/full-ready.sh" 900 \
+            || echo "::warning::[post-cutover] 全服务就绪探测超时（详见上方未就绪清单）"
 
       - name: Install auxiliary CLIs (clawhub)
         # 2026-11-01：ZCode 数据还原已前移为「Restore ZCode data (先于 Tailscale 接入)」

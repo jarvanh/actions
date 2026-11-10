@@ -257,7 +257,12 @@ do_config() {
   fi
 
   # 5. 同步回 Dropbox：copyto 幂等，内容相同自动跳过（即"有修改才上传"）
-  if has_dropbox; then
+  # 2026-11-10：交接协议实测 workflow（openclaw-handoff-test）不打扰这份共享配置
+  # —— 它用的 token 与生产相同，conf 内容一致，copyto 幂等本会自动跳过；但保险起见
+  # 显式跳过（万一测试机因掩码/换行差异写回了不同内容，会把生产配置弄乱）
+  if [ -n "${RCLONE_SKIP_PERSIST:-}" ]; then
+    echo "RCLONE_SKIP_PERSIST 已设，跳过 conf 回写 Dropbox"
+  elif has_dropbox; then
     if rclone copyto "$CONF" "$PERSIST_REMOTE"; then
       echo "rclone.conf 已同步到 $PERSIST_REMOTE"
     else

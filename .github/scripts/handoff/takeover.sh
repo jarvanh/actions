@@ -98,6 +98,17 @@ echo "📊 [takeover] oc 传输量 $(( _rs_bytes / 1048576 ))MB / ${_rs_sec}s = 
 echo "📊 [takeover] zc rsync: $(grep -E 'total transferred file size|Number of regular files transferred' /tmp/handoff-rsync-zc.log 2>/dev/null | tr '\n' ' ')"
 [ "$_zc_rc" = "0" ] || abort_takeover "zcode 增量 rsync 失败 rc=$_zc_rc（$(tail -n 3 /tmp/handoff-rsync-zc.log 2>/dev/null | tr '\n' ' ')）"
 
+# ── 4.5 Phase 2：AI 整包直取（**后台**，不占聊天路径）──
+# 关键：这段绝不能同步等 —— 旧轮要先停 AI 栈再打包，最坏 2-3 分钟；
+# 放在关键路径上会直接拖长聊天路径的下线时长（本末倒置）。
+# 后台取到就播种 prefetch（AI 栈跳过 Dropbox 下载），取不到 gate 自动回退。
+if [ -f "$here/ai-payload-fetch.sh" ]; then
+  setsid nohup bash "$here/ai-payload-fetch.sh" "${OLD_TS_IP}" \
+    >/dev/null 2>&1 < /dev/null &
+  disown 2>/dev/null || true
+  echo "🚀 [takeover] AI 整包后台直取已启动（不阻塞上线）"
+fi
+
 # ── 5. 一致性校验：主 state 库 inline 快查（其余 agent 库由 serving 侧后台查）──
 _qc="$(timeout 60 sqlite3 "$HOME/.openclaw/state/openclaw.sqlite" 'PRAGMA quick_check;' 2>&1 | head -n 1 || true)"
 [ "$_qc" = "ok" ] || abort_takeover "state/openclaw.sqlite quick_check 异常（${_qc:-<无输出>}）"

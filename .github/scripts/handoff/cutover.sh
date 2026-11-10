@@ -94,10 +94,17 @@ done < <(find "$HOME/.zcode" -name '*.sqlite-wal' -size +0c -printf '%h\n' 2>/de
 echo "✅ [cutover] sqlite checkpoint 完成"
 
 # ── 2. 停本机隧道（oc=聊天公网入口 / qb=quota-board 面板），继任者接管后自起 ──
-sudo systemctl stop cftun-oc.service cftun-qb.service 2>/dev/null || true
-echo "✅ [cutover] 本机 cloudflared 隧道已停"
+# 2026-11-10：测试模式（HANDOFF_TEST=1）绝不停生产隧道 —— 测试节点没有继任者
+# 接管生产隧道的流量（oc 隧道绑死生产云凭据与域名），停了生产公网入口就真黑了。
+if [ -n "${HANDOFF_TEST:-}" ]; then
+  echo "ℹ️ [cutover] 测试模式：跳过停生产隧道（cftun-oc/cftun-qb 保持运行）"
+else
+  sudo systemctl stop cftun-oc.service cftun-qb.service 2>/dev/null || true
+  echo "✅ [cutover] 本机 cloudflared 隧道已停"
+fi
 
-# ── 3. rsync 只读 daemon（绑 tailscale IP；模块 oc/zc 分别映射两个状态树）──
+# ── 3. rsync 只读 daemon（绑 tailscale IP；模块 oc/zc 映射状态树，ai 放 AI 整包）──
+mkdir -p /tmp/handoff-ai-payload
 cat > "$RSYNCD_CONF" <<EOF_RSYNC
 port = ${HANDOFF_RSYNC_PORT}
 address = ${TS_IP}
@@ -112,6 +119,15 @@ use chroot = no
     path = ${HOME}/.zcode
     read only = yes
     comment = zcode state (handoff source)
+[ai]
+    # Phase 2：放「交出瞬间现做的 OmniRoute 整包」（含 compose/.env + data.tar.gz）。
+    # 继任者用 rsync 直取这个包，交给**原有** restore 逻辑消费（校验+载入命名卷），
+    # 传输方式换了、恢复语义一行没动；取不到就退回 Dropbox 归档（ai.json 路径）。
+    # 注意：绝不能只铺 ~/omniroute 目录 —— 数据在命名卷里，只铺目录会让
+    # restore 的「部署目录已就绪」短路命中空卷，等于丢数据。
+    path = /tmp/handoff-ai-payload
+    read only = yes
+    comment = omniroute archive tarball (Phase 2 fast path)
 EOF_RSYNC
 rsync --daemon --config="$RSYNCD_CONF" 2>/dev/null || true
 # daemon fork 后子进程绑定有亚秒级延迟，轮询等它。⚠️ 锚点用 [[:space:]] 而非 $：

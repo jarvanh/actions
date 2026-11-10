@@ -34,6 +34,11 @@ echo "═══ [new] 归档循环闸门（真 gate.sh archives_done，仍需等
 bash "$HS/gate.sh" archives_done
 echo "archive 闸门放行（归档循环用，不影响服务可用性）"
 
+echo "═══ [new] 整体上线（所有服务端口就绪才算——主人口径）"
+bash "$HS/full-ready.sh" 120 || echo "::warning::测试环境只有部分端口，按可得端口计"
+FULL_READY=$(date +%s)
+[ "${STOP_EPOCH:-0}" -gt 0 ] && echo "📉 [full] 旧轮停机 → 整体上线: $(( FULL_READY - STOP_EPOCH ))s"
+
 echo "═══ [new] 验收"
 fail=0
 chk() { if [ "$2" = "$3" ]; then echo "  ✅ $1"; else echo "  ❌ $1（期望=$3 实际=$2）"; fail=$((fail+1)); fi; }
@@ -49,8 +54,8 @@ echo "╔═══════════════════════�
 echo "║ 继任者就位→rsync 完成: $((DONE_EPOCH - READY_EPOCH))s"
 if [ "${STOP_EPOCH:-0}" -gt 0 ]; then
   echo "║ 聊天路径下线(停机→serving):      $(( CHAT_READY - STOP_EPOCH ))s"
-  echo "║ 模型通道下线(停机→闸门放行):     $(( MODEL_READY - STOP_EPOCH ))s"
-  echo "║ ★ 整体下线(取最晚恢复的组件):   $(( MODEL_READY > CHAT_READY ? MODEL_READY - STOP_EPOCH : CHAT_READY - STOP_EPOCH ))s"
+  echo "║ 模型通道下线(停机→数据可用):     $(( MODEL_READY - STOP_EPOCH ))s"
+  echo "║ ★ 整体上线(停机→全部服务可用):  $(( FULL_READY - STOP_EPOCH ))s"
 fi
 echo "╚══════════════════════════════════════════════"
 [ "$fail" = "0" ] || { echo "❌ 验收失败 $fail 项"; exit 1; }

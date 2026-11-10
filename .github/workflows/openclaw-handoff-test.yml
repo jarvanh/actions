@@ -59,6 +59,10 @@ jobs:
       HANDOFF_WORKFLOW: openclaw-handoff-test.yml
       # 名字回收守护的目标恒为 openclaw —— 测试绝不能跑它（会与生产在服务中的节点抢名）
       HANDOFF_SKIP_RECLAIM: "1"
+      # 测试模式开关（cutover.sh 读）：绝不停生产隧道 cftun-oc/cftun-qb
+      HANDOFF_TEST: "1"
+      # 不回写共享的 rclone.conf（token 相同、内容一致，本会幂等跳过；显式跳过防意外）
+      RCLONE_SKIP_PERSIST: "1"
       # 实测参数：载荷量级贴近生产增量（~1.9GB），归档仿真耗时贴近生产实测（~300s）
       PAYLOAD_MB: ${{ inputs.payload_mb || '1500' }}
       ARCHIVE_SIM_SECONDS: ${{ inputs.archive_sim_seconds || '300' }}
