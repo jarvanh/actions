@@ -25,7 +25,8 @@
 #   3. guard.sh：serve 模式启动时发现其他未完成 run → 自我取消让位
 # 不变量：任意时刻 ≤1 个「通过 guard 且已接管 serving」的 run。
 
-HANDOFF_REMOTE_DIR="dropbox:self-hosted/handoff"
+# 2026-11-10：测试 workflow 用 HANDOFF_REMOTE_DIR 覆盖到独立前缀，生产默认不变
+HANDOFF_REMOTE_DIR="${HANDOFF_REMOTE_DIR:-dropbox:self-hosted/handoff}"
 HANDOFF_OLD_REMOTE="$HANDOFF_REMOTE_DIR/old.json"
 HANDOFF_NEW_REMOTE="$HANDOFF_REMOTE_DIR/new.json"
 HANDOFF_STATE_DIR="/tmp/openclaw-handoff"

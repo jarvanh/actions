@@ -46,7 +46,8 @@ case "$(handoff_run_status "$SID")" in
   completed|failure|cancelled) abort_handoff "继任者 run=$SID 已终止" ;;
 esac
 
-TS_IP="$(tailscale ip -4 2>/dev/null | head -n 1 | tr -d '[:space:]')"
+# 非托管 daemon（测试/sudo 场景）下 runner 用户可能读不到 CLI socket，sudo 兜底
+TS_IP="$( { tailscale ip -4 2>/dev/null || sudo -n tailscale ip -4 2>/dev/null; } | head -n 1 | tr -d '[:space:]')"
 [ -n "$TS_IP" ] || abort_handoff "拿不到本机 tailscale IP"
 CUTOVER_TS=$(date +%s)
 BASE_MARKER="$(cat /tmp/openclaw-archive-marker.openclaw 2>/dev/null | tr -dc '0-9')"
