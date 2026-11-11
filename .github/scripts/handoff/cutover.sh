@@ -109,9 +109,14 @@ systemctl --user stop openclaw-health.timer gateway-watchdog.timer \
   zcode2api-proxy-watchdog.timer 2>/dev/null || true
 echo "✅ [cutover] 本机自愈看门狗已暂停（防交接期间拉回隧道/服务）"
 
-# ── 2b. 停本机隧道（oc=聊天公网入口 / qb=quota-board 面板），继任者接管后自起 ──
-sudo systemctl stop cftun-oc.service cftun-qb.service 2>/dev/null || true
-echo "✅ [cutover] 本机 cloudflared 隧道已停"
+# ── 2b. 停本机隧道（**只停聊天入口 oc**）──
+# qb（额度看板 Mini App）刻意不停：看板是只读 UI，秒级可替换，但公网入口一旦断了
+# 就要等继任者把看板跑起来（在 AI 闸门之后，约 1-3 分钟）—— 主人实测到的「看板掉线」
+# 就是这段空窗。留旧 VM 的 qb connector 到 job 结束（VM 销毁即自然下线），
+# 继任者随后起自己的 connector；两个 connector 并存期间 Cloudflare 随机分流，
+# 旧看板在上游停掉后只会显示降级数据，不会 404/断连。
+sudo systemctl stop cftun-oc.service 2>/dev/null || true
+echo "✅ [cutover] 聊天隧道已停；看板隧道 qb 保留（避免 Mini App 断连）"
 
 # ── 3. rsync 只读 daemon（绑 tailscale IP；模块 oc/zc 映射状态树，ai 放 AI 整包）──
 mkdir -p /tmp/handoff-ai-payload
