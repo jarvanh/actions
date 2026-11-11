@@ -2160,11 +2160,6 @@ jobs:
           # 内部自带 P5b 等齐门，会等上面六个 rc 就绪）
           bash -eo pipefail "$OC_DIR/run-ai-gateway.sh" \
             || echo "::warning::[post-cutover] run-ai-gateway 返回非零（降级链已尽力，详见脚本日志）"
-          # 2026-11-10（主人定口径）：整体上线 = 所有服务都能正常使用，而不是
-          # 「聊天网关起来了」。逐个探活本地端口，等齐才算，并把相对旧轮停机时刻
-          # 的下线秒数打进日志（生产每轮都会有一条 ★ 整体上线）。
-          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/full-ready.sh" 900 \
-            || echo "::warning::[post-cutover] 全服务就绪探测超时（详见上方未就绪清单）"
           # 2026-11-10：AI 整包直取是后台进程，结果只落在 /tmp；这里显式回显，
           # 否则「直取到底成没成功」在 step 日志里完全不可见 —— 生产首轮就是
           # 因为这样看起来「从来没成功过」。
@@ -2678,6 +2673,11 @@ jobs:
             echo "⏱️ [post-health] ${_tag} rc=${_rc}（等待 ${_waited}s）"
           done
           echo "后台收尾汇总：$( [ "$_bad" = "0" ] && echo 全部成功 || echo 有步骤非 0，已告警不级联)"
+          # 2026-11-11 位置修正（主人实测 17min 下线的另一半原因）：整体上线探测原先
+          # 挂在 post-cutover 末尾，而看板(8321)/rsstt 由**后续**步骤启动 → 它必然空等
+          # 满 900s 超时。挪到这里：rsstt 与看板都已拉起，8 个端口才可能在同一点齐。
+          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/full-ready.sh" 300 \
+            || echo "::warning::[handoff] 全服务就绪探测超时（详见上方未就绪清单）"
 
       - name: Start background archive loop
         # 2026-10-23：只有 Install 与 Run 都成功才启动归档循环。Install 失败时
