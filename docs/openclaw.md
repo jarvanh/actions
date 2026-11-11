@@ -45,6 +45,20 @@
 - **可观测性**：Phase 0 埋点在每轮收尾日志输出 `[phase0]` 段（增量字节/文件数/直连评估），
   用于校准 rsync 增量交接的实际收益。
 
+### 三个手动开关（2026-11-11）
+
+生产上要「按需」测交接或按需回退传统路径时用，不必等死线、也不必回滚代码。
+
+| 开关 | 用法 | 语义 |
+|---|---|---|
+| 立即交接 | `ssh runner@openclaw 'touch /tmp/openclaw-handoff-request'` | 不等 T-12min，**立刻派发继任者**；`tick.sh` 每 15s 查一次，等继任者 `ready` 后写 restart-request → Keep alive 退出 → 收尾步骤 `cutover.sh` 接管并等 `serving`。继任者放弃（aborted）时自动解除、保持正常保活 |
+| 传统提前收尾 | `ssh runner@openclaw 'touch /tmp/openclaw-restart-request'` | 不派发继任者，直接进入收尾（停服 → 归档 → Trigger next）。最坏丢 ≤20min 增量，主包因「临时对象 + 尺寸校验 + 原子改名」不会被半截包覆盖 |
+| 启动方式 | 手动运行 workflow 时选 `startup_mode` | `auto`=跟随仓库变量 `OPENCLAW_HANDOFF`；`handoff`=强制按交接模式（定点验证）；`traditional`=强制传统（本轮不派发继任者、不交出）。与 `handoff_of` 分工：前者决定「是否参与交接」，后者决定「本轮是不是继任者」 |
+
+> 立即交接**不会**跳过继任者的基座恢复（~10-12min）：`cutover.sh` 只给继任者 5min 的
+> `ready` 等待，硬提前交出会退化成传统收尾、白停一次。`tick.sh` 因此采取「先派发、
+> 等 ready、再交出」两段式。
+
 
 ### 步骤顺序
 

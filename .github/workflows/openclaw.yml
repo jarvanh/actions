@@ -25,6 +25,18 @@ on:
         type: string
         required: false
         default: ""
+      # 2026-11-11：启动方式开关。auto 跟随仓库变量 OPENCLAW_HANDOFF（生产默认）；
+      # traditional 强制关闭交接（本轮不派发继任者、不交出，死线走传统收尾）；
+      # handoff 强制开启（即使仓库变量被关掉，也按交接模式跑，便于定点验证）。
+      # 与 handoff_of 的分工：本开关决定「是否参与交接」，handoff_of 决定「是否作为继任者」。
+      startup_mode:
+        description: "启动方式：auto=跟随仓库变量；handoff=强制交接；traditional=强制传统"
+        type: choice
+        default: auto
+        options:
+          - auto
+          - handoff
+          - traditional
 
 permissions:
   contents: read
@@ -48,7 +60,9 @@ jobs:
       # = 纯传统路径（不触发继任者、不交出、不动隧道与主机名）。
       # 生产出过「Tailscale 改名卡 tmp」与「AI 直传版本错配」两个问题后加的闸：
       # 要停只需删掉这个仓库变量，不必回滚代码。
-      OPENCLAW_HANDOFF: ${{ vars.OPENCLAW_HANDOFF }}
+      # 2026-11-11：workflow_dispatch 的 startup_mode 可覆盖本变量（auto 时仍读变量）：
+      #   traditional → 强制 0（本轮只走传统收尾）；handoff → 强制 1（定点验证交接）。
+      OPENCLAW_HANDOFF: ${{ inputs.startup_mode == 'traditional' && '0' || (inputs.startup_mode == 'handoff' && '1' || vars.OPENCLAW_HANDOFF) }}
       # 2026-11-10：AI 提前快照子开关（默认关）。实测：交出瞬间停 AI 栈再打包要
       # ~8min，模型通道反而比「AI 栈保持在线到归档后」（~213s）更慢 —— 这是回归。
       # 默认关 = AI 栈照旧在线，继任者等 archives_done 起模型（基线时序）；
@@ -4405,7 +4419,9 @@ jobs:
           # 旧路径是直接 `gh run cancel`（硬杀 job）：GitHub 取消不会执行
           # 「Stop OpenClaw and Final Archive」，归档被跳过，新 VM 只能回到上一轮
           # 周期归档（20 分钟间隔）的状态，最坏丢 20 分钟写入。
-          REQUEST_FILE="/tmp/openclaw-restart-request"
+          # 手动交接（tick.sh 检测到继任者 ready 后写同一文件）也走这里：
+          # 提前结束保活 → 收尾步骤里的 cutover.sh 等 serving。
+          REQUEST_FILE="${HANDOFF_RESTART_REQUEST:-/tmp/openclaw-restart-request}"
           _waited=0
           while [ "$_waited" -lt "$SLEEP_SECONDS" ]; do
             if [ -f "$REQUEST_FILE" ]; then
