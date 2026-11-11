@@ -216,7 +216,14 @@ jobs:
           #   PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES
           #                                判定指标回退门槛（默认 3）：主指标达标数 < 该值且
           #                                另一指标更多才改判。与 MIN_NODES 是两回事，别混用
-          PROXY_SPEEDTEST_MIN_MEGABIT: '10'
+          # ⚠️ 阈值 10 → 5 兆（2026-11-11，与 gitee 同批）：上传改成真传 10MiB 后，cdn
+          # 这条链路的真实上行就是 ~0.7 MiB/s ≈ 5.8 Mbps（run 42953380754 实测
+          # p50 0.72、max 1.31 MiB/s）⇒ 10 兆（1.25 MiB/s）只有 5 个节点过线，**恰好落在
+          # 回退门槛 [3, MIN_NODES) 区间**：primary=5 ≥ 3 不触发 download 回退，又
+          # < min_nodes=10 不能上传 ⇒ 订阅静默停更（`qualified nodes < min_nodes`）。
+          # 上一轮能更新是因为 primary=0 触发了回退；可见「回退门槛 3」与「最少数 10」
+          # 之间存在真实盲区（另案处理，不在本次改动内）。降到 5 兆 ≈ p50。
+          PROXY_SPEEDTEST_MIN_MEGABIT: '5'
           PROXY_SPEEDTEST_SPEED_METRIC: 'upload'
           PROXY_SPEEDTEST_MIN_NODES: '10'
           PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES: '3'
