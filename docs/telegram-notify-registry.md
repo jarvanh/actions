@@ -31,7 +31,7 @@
 | Emby | `.github/workflows/emby.yml` | 服务启停、直链回退、播放通知 | 启停与回退 **alert**；播放 **普通** |
 | 测速三套 | `.github/scripts/proxy-speedtest/speedtest_common.py` | CDN / Gitee / 泰尔三网主报告、异常退出与终止兜底 | 主报告**普通**；❌ 异常退出 / ⛔ 异常终止 **alert** |
 | 保活接力熔断 | `.github/scripts/lib/self_retrigger.sh` | `🧯 保活接力已熔断` | **alert** |
-| 本机常驻服务（仓库外） | `board.py`、`gateway-watchdog.py`、`health/system_health.sh` | 数据源失联、网关异常/恢复、系统健康故障/恢复 | 故障 **alert**；恢复**普通** |
+| 本机常驻服务 | `.github/scripts/health/system_health.sh`（在仓库内）；`board.py`、`gateway-watchdog.py`（在宿主机 `/dropbox/self-hosted/quota-board/`，不在仓库） | 数据源失联、网关异常/恢复、系统健康故障/恢复 | 故障 **alert**；恢复**普通** |
 | 媒体 caption | `tg_send_video.py`、`sync_notify.sh` 的 `sendDocument` | 随视频发出的三行说明 | 不走档位（不经 sendMessage） |
 
 > **内嵌通知与兜底的现状**：`ph-dl` 的崩溃兜底、`emby` 的 OpenList 凭据通知已拆成独立

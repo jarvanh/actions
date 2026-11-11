@@ -493,23 +493,53 @@ def check():
     bad = []
     try:
         doc = open("docs/telegram-notify.md", encoding="utf-8").read()
-        sec = doc.split("### 5.3 助手速查")[1].split("---")[0]
-        rows = [l for l in sec.split("\n") if l.startswith("|") and "`" in l][2:]
+        # 章节边界用「下一个标题」，不能用 "---"：表格自身的 |---|---| 分隔行会把
+        # 整个表切断，导致本项解析出 0 行、恒绿（实测发现的假绿）
+        sec = re.split(r"\n#{2,4} ", doc.split("### 5.3 助手速查")[1])[0]
+        rows = []
+        for l in sec.split("\n"):
+            if not l.startswith("|"):
+                continue
+            if re.match(r"^\|[\s:|-]+\|?$", l):   # |---|---| 分隔行
+                continue
+            cells = [c.strip() for c in l.strip("|").split("|")]
+            if len(cells) > 1 and "`" in cells[1]:  # 跳过表头（第一列是「用途」）
+                rows.append(l)
         srcs = {
             "bash": open(".github/scripts/telegram/tg_notify.sh", encoding="utf-8").read(),
             "pwsh": open(".github/scripts/telegram/tg_notify.ps1", encoding="utf-8").read(),
             "python": open(".github/scripts/proxy-speedtest/speedtest_common.py", encoding="utf-8").read(),
         }
+        def primary_names(cell):
+            """只取单元格开头那串「主助手名」，跳过其后的中文解释与跨文件提及。
+
+            - 前缀截到第一个 CJK 字符或全角括号：解释性提及（如「走 sync_to_tg.sh 内嵌
+              human_size」）不算本实现的能力声明
+            - 反引号内容必须是「标识符」或「标识符(...)」：shell 示例（TZ=Asia/Shanghai date）、
+              `$TG_SEP`、文件名（sync_to_tg.sh）都不当作助手名
+            """
+            prefix = re.split(r"[\u4e00-\u9fff（]", cell)[0]
+            names = []
+            for tok in re.findall(r"`([^`]+)`", prefix):
+                tok = tok.strip()
+                m = re.fullmatch(r"([A-Za-z_]\w*)", tok)
+                if m:
+                    names.append(m.group(1)); continue
+                m = re.fullmatch(r"([A-Za-z_]\w*)\s*\(.*\)", tok)
+                if m:
+                    names.append(m.group(1))
+            return names
+
         for r in rows:
             cells = [c.strip() for c in r.strip("|").split("|")]
             for col, kind in ((1, "bash"), (2, "pwsh"), (3, "python")):
                 if col >= len(cells):
                     continue
-                for name in re.findall(r"`([A-Za-z_]\w*)`", cells[col]):
+                for name in primary_names(cells[col]):
                     if kind == "bash":
                         ok = re.search(rf"^{name}\(\)", srcs[kind], re.M) or name == "TG_SEP"
                     elif kind == "pwsh":
-                        ok = re.search(rf"^function {name}\b", srcs[kind], re.M) or name.startswith("$")
+                        ok = re.search(rf"^function {name}\b", srcs[kind], re.M) or name == "TG_SEP"
                     else:
                         ok = re.search(rf"^def {name}\b", srcs[kind], re.M) or name == "TG_SEP"
                     if not ok:
