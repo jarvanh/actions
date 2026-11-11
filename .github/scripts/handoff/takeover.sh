@@ -79,8 +79,15 @@ echo "🤝 [takeover] 旧轮已交出（rsync 源 ${OLD_TS_IP}:${HANDOFF_RSYNC_P
 
 # ── 4. 增量直传（oc ∥ zc 两路并行；基座是 ≤20min 前的周期包，实际传的是 delta）──
 handoff_put "$HANDOFF_NEW_REMOTE" "$(handoff_new_json rsync_started)"
+# 2026-11-11：交接时排除 cli/rollout（实测 6.6GB / 26 个大文件）。
+# 依据（2026-11-02 实证，见归档脚本注释）：rollout 全是 model-io-* 观测转储，
+# **会话正文在 db.sqlite**，剔除不丢会话；归档侧对 rollout 采用「保留 + 14 天
+# 保留窗清源」控制体积，而不是剔除。
+# 取舍：交接排除可省 ~6.6GB / ~4 分钟（实测 takeover 244s 的几乎全部），
+# 代价是继任者的 rollout 历史最多落后一个周期包（≤20 分钟），仅影响调试转储。
 _zc_rc=0
 ( timeout 780 rsync -a --delete --timeout=60 --stats \
+    --exclude 'cli/rollout/**' \
     rsync://"${OLD_TS_IP}:${HANDOFF_RSYNC_PORT}"/zc/ "$HOME/.zcode/" 2>&1 \
   | tail -n 4; exit "${PIPESTATUS[0]}" ) > /tmp/handoff-rsync-zc.log 2>&1 & _zc_pid=$!
 _rs_t0=$(date +%s)
