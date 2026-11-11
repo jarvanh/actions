@@ -2235,6 +2235,22 @@ jobs:
                 journalctl --user -u quota-board --no-pager -n 20 2>/dev/null || true
               else
                 echo "✅ [quota] 15s 稳定存活且 8321 在听"
+                # 2026-11-11：看板隧道在此启动（晚于看板就绪，避免 tunnels.sh 的
+                # 60s 端口等待落空）。交接轮还要**等旧轮 job 结束**再起 ——
+                # 旧 VM 的 qb connector 保留到销毁，两个 connector 并存会让 Cloudflare
+                # 随机分流到即将下线的旧看板；按主人要求「旧看板停了才切新的」，
+                # 这里以「旧 run completed」为切换点（gh api，≤10min 兜底）。
+                if [ -n "${HANDOFF_OF:-}" ] && [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
+                  _w=0
+                  while [ "$_w" -lt 600 ]; do
+                    _st="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${HANDOFF_OF}" --jq '.status' 2>/dev/null || echo unknown)"
+                    [ "$_st" = "completed" ] && break
+                    sleep 10; _w=$((_w + 10))
+                  done
+                  echo "⏱️ [quota] 等旧轮结束 ${_w}s（status=${_st:-unknown}）→ 起 qb 隧道"
+                fi
+                [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ] \
+                  && bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure qb || true
               fi
             )
             echo $? > "/tmp/post-health-${_bg_tag}.rc"
@@ -2258,9 +2274,10 @@ jobs:
           # Falls back to nohup only if the manager is unavailable.
           if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
             bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure oc || true
-            # 2026-11-06：qb 隧道与 oc 串行执行（同一脚本 flock -n 抢不到会跳过），
-            # 原属后台 quota-board 步，为并发安全移到这里。
-            bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure qb || true
+            # 2026-11-11：qb（看板 Mini App）**不在此处启动** —— 本步在交接轮里早于
+            # 「Run quota-board」，而看板要等 AI 闸门放行才起（可能几分钟），
+            # tunnels.sh 的端口等待只有 60s → qb 被静默跳过，看板公网入口直接缺失
+            #（主人实测的「看板掉线」根因之一）。改由看板步骤在确认看板存活后启动。
           else
             nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc \
               > ~/.openclaw/logs/cloudflared_oc.log 2>&1 &
