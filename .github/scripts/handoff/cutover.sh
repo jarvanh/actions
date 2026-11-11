@@ -115,6 +115,22 @@ echo "✅ [cutover] 本机自愈看门狗已暂停（防交接期间拉回隧道
 # 由继任者确认切换成功后统一拉起（与其零丢失口径完全一致）。
 #
 # 顺序：先停服务（让它落盘干净），再停入口（避免入口指向已停服务）。
+# ① 先停「写 ~/.zcode/cli/db/db.sqlite 的进程」—— 它是会话真源（2026-11-11 实证：
+#   session/message/part 都在此），且实测有 4.1MB 活跃 -wal。不停就抓活体库，
+#   rsync 会把撕裂快照或停机后的写入丢掉。WorkBuddy Server 的单元名带随机后缀，
+#   用通配停；zcode-cli 是裸进程，pkill 兜底。
+for _u in $(systemctl --user list-units --all --plain --no-legend 'com.zhipu.zcode.server.*.service' 2>/dev/null | awk '{print $1}'); do
+  systemctl --user stop "$_u" >/dev/null 2>&1 || true
+done
+pkill -x zcode-cli 2>/dev/null || true
+sleep 2
+# checkpoint：复用本文件上方已有的 _checkpoint_db（与 openclaw 侧同款口径），
+# 把 -wal 并回主库，rsync 抓到的是一致静树
+_checkpoint_db "$HOME/.zcode/cli/db/db.sqlite"
+_checkpoint_db "$HOME/.zcode/v2/tasks-index.sqlite"
+echo "✅ [cutover] WorkBuddy Server / zcode-cli 已停，db.sqlite 已 checkpoint"
+
+# ② 其余服务与入口
 for _s in workbuddy zcode2api qingyan autoclaw quota-board; do
   bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" stop "$_s" >/dev/null 2>&1 || true
 done
