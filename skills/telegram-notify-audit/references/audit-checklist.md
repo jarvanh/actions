@@ -23,7 +23,7 @@
 | 13 | 接力轮重复通知 | 长跑 workflow 里按「服务已就绪」判据发通知的调用点 | 用 `/tmp` 标记文件区分首轮/接力轮，接力轮只记日志；否则每个接力 run 重复推同一条（规范 · 通知函数的正确接法） |
 | 14 | `🕒` 误用 | `🕒` | 只允许出现在无 run 上下文的常驻服务收尾区（`health/system_health.sh`、`board.py`、`gateway-watchdog.py`）；正文分节/时间行不得使用 |
 | 15 | 展示时间时区 | 通知字符串里的 `UTC`；无 `TZ=` 的 `date +%F` | 展示时间一律东八区（`YYYY-MM-DD HH:MM（东八区）`）；仅机器值（marker/JSON/日志/run 时间戳）可 UTC。取展示值必须 `TZ=Asia/Shanghai` |
-| 16 | 通知清单枚举 | `bash scripts/list_notify.sh` | 发送点/标题/档位三段可正常输出；档位为「动态」的必须逐个回文件确认取值（当前 4 处：`system_health.sh`、两个 backup、`pixivutil2.yml`）。**清单不落文档**，别把枚举结果抄回任何 md |
+| 16 | 通知清单枚举 / 一键校验 | `bash scripts/list_notify.sh`（清单）/ `--check`（1–15 项机械校验，FAIL 退出 1） | 发送点/标题/档位三段可正常输出；档位为「动态」的必须逐个回文件确认取值（当前 4 处：`system_health.sh`、两个 backup、`pixivutil2.yml`）。**清单不落文档**，别把枚举结果抄回任何 md |
 | 17 | 业务步内嵌通知 | 找「通知写在业务 step 末尾、该 step 无 `always()`」的调用点 | 按规范 · 接线的判据分类：依赖落盘产物的应拆独立 step；依赖运行时变量的应有失败兜底；「已就绪」语义与长驻循环通知**不拆**。别把「不拆」重复报成缺陷 |
 
 ## 2. 四域判据（派 worker 时写进 prompt 的摘要）

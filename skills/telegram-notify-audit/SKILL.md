@@ -34,6 +34,12 @@ agent_created: true
 折叠规则判定、「发送层」（硬约束）、「验证与交付」；既有基线见
 `references/audit-checklist.md`。
 
+机械项一条命令跑完（1–15 项，FAIL 时退出码 1）：
+
+```bash
+bash scripts/list_notify.sh --check
+```
+
 判定「谁是真源」看三样：真源文件的注释、测试夹具、与平行实现的对照——
 **不看出现次数**。多处重复实现不代表它是规范。
 

@@ -964,6 +964,12 @@ tg_add_footer msg; printf '%s\n' "$msg"
 bash skills/telegram-notify-audit/scripts/render_preview.sh
 ```
 
+改完再跑一遍机械校验（审计清单 1–15 项，有偏差退出码 1，可直接当门禁）：
+
+```bash
+bash skills/telegram-notify-audit/scripts/list_notify.sh --check
+```
+
 ### 7.2 回归套件
 
 改到 openlist 域的脚本时跑回归（`.github/scripts/openlist/tests/` 下的套件）：
