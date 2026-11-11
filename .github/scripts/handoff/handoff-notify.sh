@@ -32,15 +32,18 @@ case "$stage" in
     }
     [ -n "${KV[old_run]:-}" ] && tg_add_link msg "旧轮" "$(_run_url "${KV[old_run]}")" "run ${KV[old_run]}"
     [ -n "${KV[new_run]:-}" ] && tg_add_link msg "继任" "$(_run_url "${KV[new_run]}")" "run ${KV[new_run]}"
-    if [ -n "${KV[eta]:-}" ]; then
-      # 手动交接（tick.sh 传 eta=0）没有「还剩几分钟」这回事，别写「约 0 分钟后」
-      if [ "${KV[eta]}" = "0" ]; then
-        tg_add_kv msg "交出" "手动交接已触发，继任者就绪后立即交出"
-      else
-        tg_add_kv msg "预计交出" "约 ${KV[eta]} 分钟后"
-      fi
+    if [ -n "${KV[manual]:-}" ]; then
+      # 手动交接：不等死线（继任者 ready 就交出，实测 3 分钟）→ 必须明确催促停写，
+      # 否则读者以为还能用几小时，冻结后写入就丢了。
+      tg_add_kv msg "交出" "手动交接：继任者就绪后立即交出（通常 3-5 分钟）"
+      tg_add_note msg "⚠️ 请现在就停止写入：本轮不会等到死线。交出时会停 OpenClaw 网关，此后的写入不会进最终快照。"
+    elif [ -n "${KV[eta]:-}" ]; then
+      # 自动交接：距死线还有 N 分钟，仍可正常使用
+      tg_add_kv msg "预计交出" "约 ${KV[eta]} 分钟后"
+      tg_add_note msg "此阶段服务完全在线，可正常使用；停机会在交出前单独提示（T-2 倒计时）。"
+    else
+      tg_add_note msg "此阶段服务完全在线，可正常使用；真正停机会在交出前单独提示。"
     fi
-    tg_add_note msg "此阶段服务完全在线，可正常使用；真正停机会在交出前单独提示。"
     ;;
   ready)
     tg_add_title msg "✅ OpenClaw 交接 · 继任者已就绪"

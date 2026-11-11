@@ -57,8 +57,14 @@ if [ ! -f "$SID_FILE" ] && [ "$REMAIN" -gt 0 ] && { [ "$FORCE" = 1 ] || [ "$REMA
     if [ -n "$_sid" ]; then
       echo "$_sid" > "$SID_FILE"
       : > "$ENABLED"
-      bash "$here/handoff-notify.sh" prepare "old_run=$GITHUB_RUN_ID" "new_run=$_sid" \
-        "eta=$(( REMAIN / 60 ))" || true
+      # 2026-11-11 修：手动交接**不等死线**（继任者 ready 就交出，实测 3 分钟），
+      # 不能再给「距死线还剩多少分钟」——那会让人以为还能写 4 小时（实测误导）。
+      if [ "$FORCE" = 1 ]; then
+        bash "$here/handoff-notify.sh" prepare "old_run=$GITHUB_RUN_ID" "new_run=$_sid" "manual=1" || true
+      else
+        bash "$here/handoff-notify.sh" prepare "old_run=$GITHUB_RUN_ID" "new_run=$_sid" \
+          "eta=$(( REMAIN / 60 ))" || true
+      fi
       echo "[handoff-tick] ✅ 交接已武装：继任者 run=$_sid（T-4min 前须 ready，否则被看门狗取消）"
       if [ "$FORCE" = 1 ]; then
         echo "[handoff-tick] 🖐 手动模式：等继任者 ready 后立即请求交出（不做 T-4min 取消）"
@@ -120,7 +126,8 @@ if [ "$FORCE" = 1 ] && [ -f "$SID_FILE" ]; then
       echo "手动交接：继任者 run=${_sid} state=${_st}" \
         > "${HANDOFF_RESTART_REQUEST:-/tmp/openclaw-restart-request}"
       rm -f "$FORCE_FILE"
-      bash "$here/handoff-notify.sh" prepare "old_run=$GITHUB_RUN_ID" "new_run=$_sid" "eta=0" || true
+      # 派发时已发过「准备中（手动）」，此处不再重复发同一条；
+      # 真正交出由 cutover.sh 的「已交出」通知承接。
       ;;
     aborted)
       echo "⚠️ [handoff-tick] 手动交接失败：继任者已放弃（state=aborted），解除手动请求 → 保持正常保活"
