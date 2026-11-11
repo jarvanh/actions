@@ -25,6 +25,31 @@ install -m 644 "$ROOT/.github/scripts/telegram/tg_notify.sh" "$BIN/tg_notify.sh"
 install -m 755 "$ROOT/.github/scripts/handoff/full-ready.sh" "$BIN/full-ready.sh"
 install -m 644 "$ROOT/.github/scripts/handoff/protocol.sh" "$BIN/protocol.sh"
 
+# ── gateway-watchdog（Dropbox 真源）──
+# 2026-11-11 实测：新 VM 上根本没有这套单元 —— 仓库里从来没有步骤负责安装它，
+# 历史上靠人工/残留存在。它盯着「单元 active 但服务失能 / 容器 / 隧道 / ai-api 链路」，
+# 缺了等于少一层告警。这里从 Dropbox 真源补装（内容相同则跳过），并启用定时器。
+_GD="/dropbox/self-hosted/quota-board"
+if [ -f "$_GD/gateway-watchdog.service" ] && [ -f "$_GD/gateway-watchdog.timer" ]; then
+  _gd_changed=0
+  for _u in gateway-watchdog.service gateway-watchdog.timer; do
+    cmp -s "$_GD/$_u" "$UNIT_DIR/$_u" && continue
+    install -m 600 "$_GD/$_u" "$UNIT_DIR/$_u"
+    _gd_changed=1
+    echo "✅ 已安装用户单元 $_u（源：Dropbox）"
+  done
+  [ "$_gd_changed" = 1 ] && systemctl --user daemon-reload || true
+  if ! systemctl --user is-enabled gateway-watchdog.timer >/dev/null 2>&1; then
+    systemctl --user enable --now gateway-watchdog.timer || true
+    echo "✅ 已启用 gateway-watchdog.timer"
+  elif ! systemctl --user is-active gateway-watchdog.timer >/dev/null 2>&1; then
+    systemctl --user start gateway-watchdog.timer || true
+    echo "✅ 已启动 gateway-watchdog.timer"
+  fi
+else
+  echo "::warning::[health] /dropbox 缺 gateway-watchdog 单元（真源），本机少一层告警" >&2
+fi
+
 # 凭据：优先 alert 档（重要通知走 @SaberFuckBot），缺失时退回主 bot
 tok="${TELEGRAM_BOT_TOKEN_ALERT:-${TELEGRAM_BOT_TOKEN:-}}"
 chat="${TELEGRAM_CHAT_ID_ALERT:-${TELEGRAM_CHAT_ID:-}}"
