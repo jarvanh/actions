@@ -130,6 +130,17 @@ _checkpoint_db "$HOME/.zcode/cli/db/db.sqlite"
 _checkpoint_db "$HOME/.zcode/v2/tasks-index.sqlite"
 echo "✅ [cutover] WorkBuddy Server / zcode-cli 已停，db.sqlite 已 checkpoint"
 
+# ①b autoclaw 累计用量回推（必须在停进程之前：运行中该文件被周期改写，
+#    停止前的最后一次读取即终值）。原在收尾批2 的同一位置；现在批2 在交接轮
+#    被跳过，故把这一步挪到交出侧，保证 OPENCLAW_AI_EARLY=0 时也不丢统计。
+_stats_local=/dropbox/self-hosted/autoclaw-proxy/app/lifetime_stats.json
+_stats_remote="${AUTOCLAW_STATS_REMOTE:-dropbox:self-hosted/autoclaw-proxy/lifetime_stats.json}"
+if [ -f "$_stats_local" ]; then
+  rclone copyto "$_stats_local" "$_stats_remote" >/dev/null 2>&1 \
+    && echo "✅ [cutover] autoclaw lifetime_stats 已回推" \
+    || echo "⚠️ [cutover] autoclaw stats 回推失败（下轮启动以本地残留续计）"
+fi
+
 # ② 其余服务与入口
 for _s in workbuddy zcode2api qingyan autoclaw quota-board; do
   bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" stop "$_s" >/dev/null 2>&1 || true

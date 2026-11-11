@@ -5269,6 +5269,13 @@ jobs:
           # 2026-11-02 A1 反转后口径：聊天网关已在 2.5 停止，阶段A期间在线的只剩上游
           # 渠道（对归档无影响）。此处 OmniRoute 先停 → 上游并行停，收干净渠道后结束
           # 收尾（原「7. 停网关」段已随反转前移为 2.5）。
+          # 2026-11-11（交出即全停之后）：交接成功时 cutover 已在 T0 把 AI 栈全部停掉，
+          # 这里再停一遍是纯 no-op，却会给每个服务重发一条「⛔ 已停止」通知
+          #（主人实测 13:10 已停、13:20 又收到四条）。故 HANDOFF_DONE=1 时整段跳过，
+          # 只保留 6a 的 zcode2api 数据快照（它自身幂等，且需要静态库）。
+          if [ "${HANDOFF_DONE:-0}" = "1" ]; then
+            echo "⏭️ 交接轮：AI 栈已在 T0 交出时全停，跳过批2重复停服与通知"
+          else
           echo "6. Stopping AI stack (A1b: OmniRoute 先停 → 上游网关并行停)..."
           docker stop omniroute 2>/dev/null || echo "omniroute already stopped or missing."
           _stop_pids=""
@@ -5512,6 +5519,7 @@ jobs:
             wait "$_sp" || echo "⚠️ 停服并行分支 $_sp 非零退出（明细见上方分支日志）"
           done
 
+          fi   # ← 交接轮跳过批2 的 if 闭合
           # 6a. zcode2api 数据快照（.env + data/；A1b 移至批次2 —— zcode2api 已停，accounts.db 静默）
           Z2A_RUN_DIR="/tmp/local_zcode2api"
           if [ -f "$Z2A_RUN_DIR/.env" ] && [ -f "$Z2A_RUN_DIR/data/accounts.db" ]; then
