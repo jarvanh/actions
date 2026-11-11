@@ -158,6 +158,25 @@ else
   fails+=("❌ OpenClaw gateway 18789 未监听")
 fi
 
+# 6) 其余服务入口（8 个端口，一次性快照）
+# 2026-11-11：单元 active ≠ 用户能用。qb 事件里看板单元一直 active、8321 也在听，
+# 但公网隧道根本不存在；同理任何网关「进程活着却没在听」也只在端口上看得见。
+# 判据复用 full-ready.sh --check（与「整体上线」同一份端口表，避免两处漂移）。
+if [ "$boot_age_min" -ge 40 ]; then
+  fr=""
+  for cand in "${GITHUB_WORKSPACE:-}" "$HOME/ar6" "$HOME"/*; do
+    [ -n "$cand" ] && [ -f "$cand/.github/scripts/handoff/full-ready.sh" ] \
+      && { fr="$cand/.github/scripts/handoff/full-ready.sh"; break; }
+  done
+  if [ -n "$fr" ]; then
+    if out=$(bash "$fr" --check 2>&1); then
+      ok_notes+=("services=8/8")
+    else
+      fails+=("❌ ${out#⚠️ }")
+    fi
+  fi
+fi
+
 # 测试口：只用于核对版式（HEALTH_SIMULATE_FAIL="a|b"），生产不设置
 if [ -n "${HEALTH_SIMULATE_FAIL:-}" ]; then
   IFS='|' read -ra _sim <<< "$HEALTH_SIMULATE_FAIL"
