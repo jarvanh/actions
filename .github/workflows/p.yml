@@ -116,19 +116,29 @@ jobs:
           sudo mkdir -p "$VW_DIR"
           sudo chown -R runner:runner /dropbox
 
+          # 通知真源在 step 顶层 source 一次（规范 · 通知函数的正确接法）：
+          # 放进函数体时，函数若在 $( )/管道里跑就是子 shell，source 只改子 shell
+          # 的函数表，调用点对 send_tg 的覆写会被静默还原。
+          # shellcheck disable=SC1090
+          if source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh" 2>/dev/null; then
+            TG_READY=1
+          else
+            TG_READY=0
+            echo "::warning::tg_notify.sh 不可用，数据异常告警将只写日志"
+          fi
+
           # 数据异常告警：拉取失败与空库是两个独立故障，都要炸响。这类终止以前只有
           # 日志没人看，接力每 2 分钟空转一轮直到人工撞见。告警失败不改变终止语义。
           notify_restore_failed() {
             local reason="$1"
-            if source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh" 2>/dev/null; then
-              msg=""
-              tg_add_title msg "🚨 vaultwarden 数据恢复失败"
-              tg_add_kv msg "现象" "$reason"
-              tg_add_kv msg "处置" "本轮终止：不启动空库、不回传（防覆盖远端）"
-              tg_add_note msg "OneDrive backup/bitwarden_latest.tar.gz 可作恢复素材；修复远端后手动 dispatch"
-              tg_add_footer msg
-              send_tg "$msg" alert || true
-            fi
+            [ "${TG_READY:-0}" = "1" ] || return 0
+            msg=""
+            tg_add_title msg "🚨 vaultwarden 数据恢复失败"
+            tg_add_kv msg "现象" "$reason"
+            tg_add_kv msg "处置" "本轮终止：不启动空库、不回传（防覆盖远端）"
+            tg_add_note msg "OneDrive backup/bitwarden_latest.tar.gz 可作恢复素材；修复远端后手动 dispatch"
+            tg_add_footer msg
+            send_tg "$msg" alert || true
           }
 
           # rclone 失败时 set -e 会直接退出，走不到后面的空库检查——必须先接住，
