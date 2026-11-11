@@ -62,6 +62,11 @@ if [ -x "$DEPS" ]; then
   fi
 fi
 
+# 启动期豁免：看板/gateway 在 job 前 ~40 分钟本来就还没起（Mount Dropbox 早于它们），
+# 这段时间只盯挂载与隧道，避免开机就误报。以 PID 1 启动时刻作为 job 起点
+#（hosted runner 的 PID 1 随 job 启动，与 tg_add_footer 的时长兜底同口径）。
+boot_age_min=$(( ( $(date +%s) - $(stat -c %Y /proc/1 2>/dev/null || date +%s) ) / 60 ))
+
 # 3) 已安装的 cftun-* 隧道 —— 先自愈一次再判定
 # 2026-11-10：平行会话跑 handoff 测试时 cutover.sh 会真的 stop 生产隧道（测试隔离缺陷），
 # 隧道被停后不会自己回来。这里先 start 一次，3 秒后复检，仍起不来才告警。
@@ -81,12 +86,17 @@ for u in $units; do
   st=$(systemctl is-active "$u" 2>/dev/null || true)
   [ "$st" = active ] && ok_notes+=("$u=active") || fails+=("❌ $u: ${st:-unknown}")
 done
-[ -n "$units" ] || fails+=("❌ 未发现任何 cftun-* 隧道单元")
+if [ -z "$units" ]; then
+  # 2026-11-11 修：隧道单元由「Run Cloudflared Tunnel」/AI 网关步骤安装，交接继任者
+  # 开机时必然一个都没有（hostname 还是 openclaw-next）。此前无宽限 → 开机即告警
+  # 「未发现任何 cftun-* 隧道单元」（13:08 误报实测）。与 board/gateway 同款启动期豁免。
+  if [ "$boot_age_min" -lt 40 ]; then
+    ok_notes+=("tunnels=skip(启动期 ${boot_age_min}m，尚未安装)")
+  else
+    fails+=("❌ 未发现任何 cftun-* 隧道单元（已运行 ${boot_age_min}m）")
+  fi
+fi
 
-# 启动期豁免：看板/gateway 在 job 前 ~40 分钟本来就还没起（Mount Dropbox 早于它们），
-# 这段时间只盯挂载与隧道，避免开机就误报。以 PID 1 启动时刻作为 job 起点
-#（hosted runner 的 PID 1 随 job 启动，与 tg_add_footer 的时长兜底同口径）。
-boot_age_min=$(( ( $(date +%s) - $(stat -c %Y /proc/1 2>/dev/null || date +%s) ) / 60 ))
 
 # 4) quota-board
 # 一次性自愈：看板依赖 /dropbox 上的 board.py，挂载抖动后会 exit 120 且自己起不来
