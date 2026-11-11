@@ -512,12 +512,15 @@ After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=300
 StartLimitBurst=0
+# 脚本由 openclaw.yml 每轮用 heredoc 现场生成到 /tmp；不存在则安静跳过，
+# 不要进入"启动即失败"的崩溃循环（与 tunnels.sh 的端口预检同口径）。
+# 2026-11-11 修：此键必须写在 [Unit] —— 放 [Service] 会被 systemd 忽略
+#（实测 "Unknown key 'ConditionPathExists' in section [Service], ignoring"），
+#  于是脚本缺失时会照跑 ExecStart，配合 Restart=always 变成无界重启循环。
+ConditionPathExists=/tmp/openclaw-archive-loop.sh
 
 [Service]
 Type=simple
-# 脚本由 openclaw.yml 每轮用 heredoc 现场生成到 /tmp；不存在则安静跳过，
-# 不要进入"启动即失败"的崩溃循环（与 tunnels.sh 的端口预检同口径）。
-ConditionPathExists=/tmp/openclaw-archive-loop.sh
 ExecStart=/bin/bash /tmp/openclaw-archive-loop.sh
 Restart=always
 RestartSec=30
@@ -625,7 +628,17 @@ cmd_ensure() {
 
   # 每轮重启一次（语义对齐原 nohup 方案的 pkill + 重启；理由见文件头）
   log "重启 $unit（每轮 run 起点，确保跑在最新二进制/依赖上）"
-  svc "$name" restart
+  # 2026-11-11：刚写完单元文件时 restart 可能撞上 "Unit not found"（daemon-reload
+  # 与 manager 载入的窗口）—— 实测 archive-loop 因此静默 inactive，watchdog 连报
+  # 两轮。失败就 reload + 重试一次，仍失败才按失败处理。
+  if ! svc "$name" restart; then
+    log "⚠️ $unit 首次 restart 失败，daemon-reload 后重试一次"
+    case "$(svc_level "$name")" in
+      system) sudo systemctl daemon-reload 2>/dev/null ;;
+      user)   systemctl --user daemon-reload ;;
+    esac
+    svc "$name" restart
+  fi
   sleep 3
 
   if svc "$name" is-active --quiet; then
