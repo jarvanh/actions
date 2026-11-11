@@ -142,7 +142,12 @@ jobs:
           # timeout-minutes 成对，改一个要回看另一个。**
           PROXY_SPEEDTEST_BUDGET_SECONDS: '18000'
           PROXY_SPEEDTEST_SIZE_MIB: '10'
-          PROXY_SPEEDTEST_PUSH_TIMEOUT: '30'
+          # 上行超时（2026-11-11 从 30 上调到 60）：上传修复成「真传 10MiB」之后，
+          # push 耗时 = 10MiB ÷ 真实上行。实测（run 42822583603）`upload_seconds`
+          # p50 17.4s、p90 25.3s、max 29.9s ⇒ 30 秒上限正好卡在慢节点的分布尾部，
+          # 122 个失败里 72 个是 `git push ... timed out after 30 seconds`，
+          # 把「慢但可用」的节点误判成失败。60 秒 = p90 的 2.4 倍。
+          PROXY_SPEEDTEST_PUSH_TIMEOUT: '60'
           # 下载超时（2026-10-07 从 30 上调到 90）：下载计时段已从 checkout 挪回 clone（见
           # speedtest_gitee.git_clone_testbranch 的注释）—— 那段现在是**真实网络传输**，
           # 不再是 13~56ms 的本地解包。实测 runner 直连拉 10MiB 需 14.4 秒，绕代理节点
@@ -174,7 +179,14 @@ jobs:
           #   PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES
           #                                判定指标回退门槛（默认 3）：主指标达标数 < 该值且
           #                                另一指标更多才改判。与 MIN_NODES 是两回事，别混用
-          PROXY_SPEEDTEST_MIN_MEGABIT: '10'
+          # ⚠️ 阈值 10 → 5 兆（2026-11-11）：上传改成真传 10MiB 后，gitee 这条链路
+          # （单流 git push / clone 经代理回连 Gitee）的真实速率就是 ~0.6 MiB/s ≈ 5 Mbps，
+          # 实测 `upload_mibs` max 1.09、`download_mibs` max 0.83 ⇒ **没有任何节点过得了
+          # 10 兆线**：run 42822583603 `primary=0/secondary=0`、gist 因 `empty subscription
+          # text` 连续两轮不更新。5 兆对应 p50 附近（约半数节点过线），既保留筛选意义，
+          # 又不会让订阅永久停更。若要恢复「10 兆」口径，先换上行路径（见 README 的
+          # 上传修复说明），光调阈值没有意义。
+          PROXY_SPEEDTEST_MIN_MEGABIT: '5'
           PROXY_SPEEDTEST_SPEED_METRIC: 'upload'
           PROXY_SPEEDTEST_MIN_NODES: '10'
           PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES: '3'

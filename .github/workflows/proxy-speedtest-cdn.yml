@@ -196,7 +196,10 @@ jobs:
           # 变成自己 push 的 delta base（上传读数的真假因此混合、事后无法分辨）。
           # 仓库不存在时会由 ensure_gitee_remote 自动创建（私有）。
           PROXY_SPEEDTEST_GITEE_REPO: proxy-speedtest-temp-cdn
-          PROXY_SPEEDTEST_PUSH_TIMEOUT: '30'
+          # 上行超时（2026-11-11 从 30 上调到 60）：与 gitee 同因——上传改成真传
+          # 10MiB 后，push 耗时 = 10MiB ÷ 真实上行（本链路实测 p50 0.62 MiB/s ≈ 16 秒，
+          # 慢节点 30 秒以上）。run 42829363686 的 82 个上传 null 里多数是 30 秒超时。
+          PROXY_SPEEDTEST_PUSH_TIMEOUT: '60'
           # runner 直连基线（**不是**家庭宽带对照，2026-09-17 与 gitee 统一）：不经代理 push 一次，
           # 给出「runner 直连 vs 节点」的可比数字——只看节点带宽无法判断节点是否还不如直连。
           # 失败不打死整轮（基线是参考值）：拿不到只记 direct_baseline.ok=false。
