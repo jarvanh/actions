@@ -19,6 +19,11 @@ install -d -m 755 "$BIN" "$UNIT_DIR"
 install -m 755 "$ROOT/.github/scripts/health/system_health.sh" "$BIN/system_health.sh"
 install -m 755 "$ROOT/.github/scripts/services/dropbox_dependents.sh" "$BIN/dropbox_dependents.sh"
 install -m 644 "$ROOT/.github/scripts/telegram/tg_notify.sh" "$BIN/tg_notify.sh"
+# 2026-11-11：8 端口巡检复用 full-ready.sh --check。定时器环境里没有
+# GITHUB_WORKSPACE，也没有固定的 clone 目录 → 必须把脚本装到 $BIN 旁边，
+# 否则 health 会静默跳过服务入口检查（实测：装成 timer 后该项直接消失）。
+install -m 755 "$ROOT/.github/scripts/handoff/full-ready.sh" "$BIN/full-ready.sh"
+install -m 644 "$ROOT/.github/scripts/handoff/protocol.sh" "$BIN/protocol.sh"
 
 # 凭据：优先 alert 档（重要通知走 @SaberFuckBot），缺失时退回主 bot
 tok="${TELEGRAM_BOT_TOKEN_ALERT:-${TELEGRAM_BOT_TOKEN:-}}"

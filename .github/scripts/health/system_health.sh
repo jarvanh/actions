@@ -67,6 +67,8 @@ fi
 # 这段时间只盯挂载与隧道，避免开机就误报。以 PID 1 启动时刻作为 job 起点
 #（hosted runner 的 PID 1 随 job 启动，与 tg_add_footer 的时长兜底同口径）。
 boot_age_min=$(( ( $(date +%s) - $(stat -c %Y /proc/1 2>/dev/null || date +%s) ) / 60 ))
+# 测试口：用于核对启动期豁免之后的分支（与 --force/HEALTH_SIMULATE_FAIL 同款，生产不设置）
+[ -n "${HEALTH_BOOT_AGE_MIN:-}" ] && boot_age_min="$HEALTH_BOOT_AGE_MIN"
 
 # 3) cloudflared 隧道 —— 先按清单补齐缺失单元，再自愈已安装单元，最后判定
 # 2026-11-10：平行会话跑 handoff 测试时 cutover.sh 会真的 stop 生产隧道（测试隔离缺陷），
@@ -164,9 +166,13 @@ fi
 # 判据复用 full-ready.sh --check（与「整体上线」同一份端口表，避免两处漂移）。
 if [ "$boot_age_min" -ge 40 ]; then
   fr=""
-  for cand in "${GITHUB_WORKSPACE:-}" "$HOME/ar6" "$HOME"/*; do
-    [ -n "$cand" ] && [ -f "$cand/.github/scripts/handoff/full-ready.sh" ] \
-      && { fr="$cand/.github/scripts/handoff/full-ready.sh"; break; }
+  # 首选项：与本脚本同目录（install_health_watchdog.sh 会把 full-ready.sh 装到
+  # ~/.openclaw/bin）—— 定时器环境没有 GITHUB_WORKSPACE，只靠仓库路径会静默跳过。
+  for cand in "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/full-ready.sh" \
+              "${GITHUB_WORKSPACE:+$GITHUB_WORKSPACE/.github/scripts/handoff/full-ready.sh}" \
+              "$HOME/work/actions/actions/.github/scripts/handoff/full-ready.sh" \
+              "$HOME"/*/.github/scripts/handoff/full-ready.sh; do
+    [ -n "$cand" ] && [ -f "$cand" ] && { fr="$cand"; break; }
   done
   if [ -n "$fr" ]; then
     if out=$(bash "$fr" --check 2>&1); then
@@ -174,6 +180,8 @@ if [ "$boot_age_min" -ge 40 ]; then
     else
       fails+=("❌ ${out#⚠️ }")
     fi
+  else
+    ok_notes+=("services=skip(未找到 full-ready.sh)")
   fi
 fi
 
