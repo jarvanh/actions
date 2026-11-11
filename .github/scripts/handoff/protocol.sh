@@ -25,21 +25,12 @@
 #   3. guard.sh：serve 模式启动时发现其他未完成 run → 自我取消让位
 # 不变量：任意时刻 ≤1 个「通过 guard 且已接管 serving」的 run。
 
-# 2026-11-10：测试 workflow 用 HANDOFF_REMOTE_DIR 覆盖到独立前缀，生产默认不变
-HANDOFF_REMOTE_DIR="${HANDOFF_REMOTE_DIR:-dropbox:self-hosted/handoff}"
+HANDOFF_REMOTE_DIR="dropbox:self-hosted/handoff"
 HANDOFF_OLD_REMOTE="$HANDOFF_REMOTE_DIR/old.json"
 HANDOFF_NEW_REMOTE="$HANDOFF_REMOTE_DIR/new.json"
 # AI 栈快照的独立 marker（Phase 1.5）：与 old.json 分开写，避免两个写入方互踩
 HANDOFF_AI_REMOTE="$HANDOFF_REMOTE_DIR/ai.json"
-# 状态目录按模式隔离：测试模式（HANDOFF_TEST=1）用独立目录，绝不触碰生产的
-# enabled/successor-run-id/gate-passed —— 2026-11-10 事故：合成测试在**生产
-# serving VM 上**跑时共享了这一目录，随后 ai-archives 以测试身份停掉了生产的
-# 4 个上游 + 两个容器。此行必须在 handoff_init 之前求值。
-if [ -n "${HANDOFF_TEST:-}" ]; then
-  HANDOFF_STATE_DIR="/tmp/openclaw-handoff-test"
-else
-  HANDOFF_STATE_DIR="/tmp/openclaw-handoff"
-fi
+HANDOFF_STATE_DIR="/tmp/openclaw-handoff"
 HANDOFF_RSYNC_PORT="${HANDOFF_RSYNC_PORT:-8730}"
 HANDOFF_PROTOCOL=1
 # 预算（分钟）：T-12min 触发继任者 → T-4min 就绪看门狗 → 死线交出

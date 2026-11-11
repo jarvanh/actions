@@ -16,13 +16,6 @@ handoff_put "$HANDOFF_NEW_REMOTE" "$(handoff_new_json serving)"
 echo "🎉 [serving] new.json=serving 已写 —— 旧轮收到后 handoff_done，下线窗口就此关闭"
 
 # ── 主机名回收（等效 Enable Tailscale SSH 步的守护，但目标是交接后的名字）──
-# 2026-11-10：测试 workflow 必须跳过名字回收 —— 回收守护的目标恒为 openclaw，
-# 测试节点一跑就会与**生产在服务中的 openclaw 节点抢 DNS 名**（跨 workflow 的
-# 真实事故面）。名字切换与交接协议正交，故以开关隔离，生产默认照旧回收。
-if [ -n "${HANDOFF_SKIP_RECLAIM:-}" ]; then
-  echo "ℹ️ [serving] HANDOFF_SKIP_RECLAIM 已设，跳过主机名回收（测试模式）"
-  exit 0
-fi
 _dns="$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName // empty' 2>/dev/null | head -n 1 || true)"
 _dns="${_dns%.}"
 _ts_suffix="${_dns#*.}"

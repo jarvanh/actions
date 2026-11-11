@@ -110,14 +110,8 @@ systemctl --user stop openclaw-health.timer gateway-watchdog.timer \
 echo "✅ [cutover] 本机自愈看门狗已暂停（防交接期间拉回隧道/服务）"
 
 # ── 2b. 停本机隧道（oc=聊天公网入口 / qb=quota-board 面板），继任者接管后自起 ──
-# 2026-11-10：测试模式（HANDOFF_TEST=1）绝不停生产隧道 —— 测试节点没有继任者
-# 接管生产隧道的流量（oc 隧道绑死生产云凭据与域名），停了生产公网入口就真黑了。
-if [ -n "${HANDOFF_TEST:-}" ]; then
-  echo "ℹ️ [cutover] 测试模式：跳过停生产隧道（cftun-oc/cftun-qb 保持运行）"
-else
-  sudo systemctl stop cftun-oc.service cftun-qb.service 2>/dev/null || true
-  echo "✅ [cutover] 本机 cloudflared 隧道已停"
-fi
+sudo systemctl stop cftun-oc.service cftun-qb.service 2>/dev/null || true
+echo "✅ [cutover] 本机 cloudflared 隧道已停"
 
 # ── 3. rsync 只读 daemon（绑 tailscale IP；模块 oc/zc 映射状态树，ai 放 AI 整包）──
 mkdir -p /tmp/handoff-ai-payload
