@@ -98,12 +98,17 @@ else
 fi
 
 # ── 3. 归档并上传（复用归档循环步骤已写好的脚本；服务已停 → 静树）──
+# 2026-11-11：rsstt 用的是 `sudo tar`（数据目录 root 属主），产物也是 root 属主，
+# 而 /tmp 带 sticky 位 → 普通 rm 报 "Operation not permitted"。生产收尾路径早有
+# `|| sudo rm` 兜底，这里补齐（否则每轮交接都刷一条假错误）。
+rm_out() { rm -f "$1" 2>/dev/null || sudo -n rm -f "$1" 2>/dev/null || true; }
+
 archive_upload() { # <脚本> <本地包> <远端对象> <标签> [payload名]
   local script="$1" out="$2" remote="$3" label="$4" payload="${5:-}"
-  rm -f "$out"
+  rm_out "$out"
   if [ ! -f "$script" ]; then echo "⚠️ ${label}: 归档脚本缺失 $script"; fail_flag=1; return 1; fi
   if ! timeout 300 bash "$script" "$out" >/dev/null 2>&1 || [ ! -s "$out" ]; then
-    echo "⚠️ ${label}: 打包失败"; fail_flag=1; rm -f "$out"; return 1
+    echo "⚠️ ${label}: 打包失败"; fail_flag=1; rm_out "$out"; return 1
   fi
   # Phase 2：先投到 rsync payload 目录（继任者可直取），再传 Dropbox（保底）。
   # 顺序刻意如此：rsync 直取更快，越早可见越好；Dropbox 是失败回退路径。
@@ -122,7 +127,7 @@ archive_upload() { # <脚本> <本地包> <远端对象> <标签> [payload名]
   else
     echo "⚠️ ${label}: 上传失败"; fail_flag=1
   fi
-  rm -f "$out"
+  rm_out "$out"
 }
 
 archive_upload /tmp/create-rsstt-archive.sh          /tmp/rsstt-early.tar.gz      ${_pfx}/rsstt.tar.gz         rsstt

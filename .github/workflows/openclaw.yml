@@ -3664,6 +3664,10 @@ jobs:
 
           sudo nice -n 19 ionice -c3 tar -C "$STAGE_DIR" -czf "$OUTPUT_TAR" .
           sudo chmod 644 "$OUTPUT_TAR" 2>/dev/null || true
+          # 2026-11-11：把属主交还 runner —— sudo 产出的包在 /tmp（带 sticky 位）下
+          # 普通 rm 会报 "Operation not permitted"，消费方（交接 ai-archives / 周期
+          # 循环 / 收尾）都得写 sudo 兜底。在源头改属主，一次修掉整类问题。
+          sudo chown "$(id -u):$(id -g)" "$OUTPUT_TAR" 2>/dev/null || true
 
           actual_size=$(stat -c%s "$OUTPUT_TAR" 2>/dev/null || echo 0)
           if [ ! -s "$OUTPUT_TAR" ]; then
