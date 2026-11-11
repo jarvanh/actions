@@ -25,15 +25,29 @@ case "$stage" in
   prepare)
     tg_add_title msg "🤝 OpenClaw 交接 · 准备中"
     tg_add_kv msg "阶段" "继任者已启动，正在恢复基座并预热链路"
-    [ -n "${KV[old_run]:-}" ] && tg_add_kv msg "旧轮" "run ${KV[old_run]}"
-    [ -n "${KV[new_run]:-}" ] && tg_add_kv msg "继任" "run ${KV[new_run]}"
-    [ -n "${KV[eta]:-}" ] && tg_add_kv msg "预计交出" "约 ${KV[eta]} 分钟后"
+    # run id 做成可点链接（与收尾区「运行日志」同款 <a href>）
+    _run_url() {
+      printf '%s/%s/actions/runs/%s' \
+        "${GITHUB_SERVER_URL:-https://github.com}" "${GITHUB_REPOSITORY:-jarvanh/actions}" "$1"
+    }
+    [ -n "${KV[old_run]:-}" ] && tg_add_link msg "旧轮" "$(_run_url "${KV[old_run]}")" "run ${KV[old_run]}"
+    [ -n "${KV[new_run]:-}" ] && tg_add_link msg "继任" "$(_run_url "${KV[new_run]}")" "run ${KV[new_run]}"
+    if [ -n "${KV[eta]:-}" ]; then
+      # 手动交接（tick.sh 传 eta=0）没有「还剩几分钟」这回事，别写「约 0 分钟后」
+      if [ "${KV[eta]}" = "0" ]; then
+        tg_add_kv msg "交出" "手动交接已触发，继任者就绪后立即交出"
+      else
+        tg_add_kv msg "预计交出" "约 ${KV[eta]} 分钟后"
+      fi
+    fi
     tg_add_note msg "此阶段服务完全在线，可正常使用；真正停机会在交出前单独提示。"
     ;;
   ready)
     tg_add_title msg "✅ OpenClaw 交接 · 继任者已就绪"
     tg_add_kv msg "阶段" "基座已恢复，等待旧轮交出"
     [ -n "${KV[elapsed]:-}" ] && tg_add_kv msg "准备耗时" "$(tg_format_ms "${KV[elapsed]}")"
+    [ -n "${KV[new_run]:-}" ] && tg_add_link msg "继任" \
+      "${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-jarvanh/actions}/actions/runs/${KV[new_run]}" "run ${KV[new_run]}"
     tg_add_note msg "服务仍在线；旧轮按死线停止网关后即完成移交。"
     ;;
   cutover)
@@ -50,6 +64,8 @@ case "$stage" in
     tg_add_title msg "🚀 OpenClaw 交接 · 聊天入口已恢复"
     tg_add_kv msg "阶段" "继任者 OpenClaw 网关已健康（18789 /health=200），聊天可用"
     [ -n "${KV[downtime]:-}" ] && tg_add_kv msg "聊天下线" "$(tg_format_ms "${KV[downtime]}")"
+    [ -n "${KV[new_run]:-}" ] && tg_add_link msg "继任" \
+      "${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-jarvanh/actions}/actions/runs/${KV[new_run]}" "run ${KV[new_run]}"
     [ -n "${KV[ai]:-}" ] && tg_add_kv msg "AI 数据" "${KV[ai]}"
     tg_add_note msg "AI 网关（OmniRoute + 上游）与看板随后就绪；全部服务可用时会再发一条并报整体下线时长。"
     ;;
@@ -60,7 +76,7 @@ case "$stage" in
     [ -n "${KV[ai_ready]:-}" ] && tg_add_kv msg "AI 网关恢复" "$(tg_format_ms "${KV[ai_ready]}")"
     [ -n "${KV[chat]:-}" ] && tg_add_kv msg "聊天入口" "$(tg_format_ms "${KV[chat]}")"
     [ -n "${KV[ai]:-}" ] && tg_add_kv msg "AI 数据" "${KV[ai]}"
-    [ -n "${KV[run]:-}" ] && tg_add_path msg "新 run" "${KV[run]}"
+    [ -n "${KV[run]:-}" ] && tg_add_link msg "新 run" "${KV[run]}" "${KV[run]}"
     ;;
   *) exit 0 ;;
 esac

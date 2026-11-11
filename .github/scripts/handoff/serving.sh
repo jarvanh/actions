@@ -18,7 +18,7 @@ _cut="$(handoff_get "$HANDOFF_OLD_REMOTE" '.cutoff_epoch')"
 case "${_cut:-}" in ''|*[!0-9]*) _cut=0 ;; esac
 _dt=0; [ "$_cut" -gt 0 ] && _dt=$(( $(date +%s) - _cut ))
 _ai="Dropbox 回退"; [ -f /tmp/handoff-ai-fast.ok ] && _ai="rsync 直装"
-bash "$here/handoff-notify.sh" serving "downtime=$_dt" "ai=$_ai" || true
+bash "$here/handoff-notify.sh" serving "downtime=$_dt" "ai=$_ai" "new_run=${GITHUB_RUN_ID:-}" || true
 
 # ── 主机名回收（等效 Enable Tailscale SSH 步的守护，但目标是交接后的名字）──
 _dns="$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName // empty' 2>/dev/null | head -n 1 || true)"
