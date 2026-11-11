@@ -226,16 +226,20 @@ fi
 # 连接失败、用户输入无处落地。会话库本身没丢（序列连续），但体验上就是断线。
 # 修法：等继任者报 rsync_done（数据已到手）后，旧 VM 改名让位 ——
 # 用改名而不是 logout，旧 VM 仍在 tailnet，万一后续回退还能被访问。
+# ⚠️ 触发条件必须是 **serving**（不能用 rsync_done）：AI 快照走的就是本机
+# rsyncd 的 ai 模块，rsync_done 时快照往往刚开始 dump（2GB）——
+# 2026-11-11 23:11 实测：rsync_done 即 stop_rsyncd，继任者拉不到 AI 包，
+# 卡在 ai_archives_done 闸门 25 分钟。改名让位放到 serving 之后即可，
+# rsyncd 由 cutover 在收到 serving 后统一 stop。
 if [ -n "${SID:-}" ]; then
   _rns=""; _renamed=0
-  for _i in $(seq 1 120); do   # ≤10min
+  for _i in $(seq 1 240); do   # ≤20min（覆盖 serving 等待窗口）
     _rns="$(handoff_new_state "$SID")"
-    case "$_rns" in rsync_done|serving) _renamed=1; break ;; esac
+    case "$_rns" in serving) _renamed=1; break ;; esac
     case "$_rns" in aborted) break ;; esac
     sleep 5
   done
   if [ "$_renamed" = 1 ]; then
-    stop_rsyncd
     _retired="openclaw-retired-${GITHUB_RUN_ID:-x}"
     if sudo -n tailscale set --hostname="$_retired" >/dev/null 2>&1; then
       echo "✅ [cutover] 增量已同步 → 本机改名 ${_retired}，openclaw 让给继任者"
@@ -243,7 +247,7 @@ if [ -n "${SID:-}" ]; then
       echo "⚠️ [cutover] 改名让位失败（继任者仍可能顶着 openclaw-1）"
     fi
   else
-    echo "ℹ️ [cutover] 未见 rsync_done（state=${_rns:-?}），不改名（保留回退可达性）"
+    echo "ℹ️ [cutover] 未见 serving（state=${_rns:-?}），不改名（保留回退可达性）"
   fi
 fi
 
