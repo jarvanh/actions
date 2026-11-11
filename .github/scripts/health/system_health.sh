@@ -70,6 +70,15 @@ boot_age_min=$(( ( $(date +%s) - $(stat -c %Y /proc/1 2>/dev/null || date +%s) )
 # 测试口：用于核对启动期豁免之后的分支（与 --force/HEALTH_SIMULATE_FAIL 同款，生产不设置）
 [ -n "${HEALTH_BOOT_AGE_MIN:-}" ] && boot_age_min="$HEALTH_BOOT_AGE_MIN"
 
+# 交接切换窗口（2026-11-11）：cutover 会先把本机看门狗停掉，但**在途的 oneshot**
+# 可能已经开始探测 —— 服务刚停、它探测完就发告警（实测 21:22 误报「18789 未监听
+# + 7/8」）。cutover 在停服务前落 /tmp/openclaw-handoff/switching，存在即静默。
+# --force 是人工验证口，仍照常跑。
+if [ -f /tmp/openclaw-handoff/switching ] && [ "$FORCE" = 0 ]; then
+  echo "[health] $(TZ=Asia/Shanghai date '+%F %T') handoff=切换中（服务为故意停止），跳过本轮"
+  exit 0
+fi
+
 # 3) cloudflared 隧道 —— 先按清单补齐缺失单元，再自愈已安装单元，最后判定
 # 2026-11-10：平行会话跑 handoff 测试时 cutover.sh 会真的 stop 生产隧道（测试隔离缺陷），
 # 隧道被停后不会自己回来。这里先 start 一次，3 秒后复检，仍起不来才告警。

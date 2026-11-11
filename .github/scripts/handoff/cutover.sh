@@ -34,6 +34,8 @@ stop_rsyncd() {
 abort_handoff() { # <原因>
   echo "⛔ [cutover] 交接失败：$1 → 回退传统收尾（归档+Trigger next）"
   handoff_put "$HANDOFF_OLD_REMOTE" "$(handoff_old_json handoff_aborted "${SID:-0}" "${TS_IP:-}" "${CUTOVER_TS:-0}" "${BASE_MARKER:-0}")"
+  # 交接回退：服务会被重新拉起，撤掉「切换中」标记，让看门狗恢复告警
+  rm -f "$HANDOFF_STATE_DIR/switching" 2>/dev/null || true
   stop_rsyncd
   exit 1
 }
@@ -99,13 +101,24 @@ done < <(find "$HOME/.zcode" -name '*.sqlite-wal' -size +0c -printf '%h\n' 2>/de
   | sed 's/-wal$//' | sort -u)
 echo "✅ [cutover] sqlite checkpoint 完成"
 
+# ── 1b. 打「切换中」标记（2026-11-11）──
+# 目的：在途的 health/gateway 探测（oneshot 已开跑）可能在服务停掉之后才发告警 ——
+# 实际发生：21:22 旧轮 cutoff 瞬间收到「18789 未监听 + 7/8」的误报。
+# 两个看门狗都认这个标记：存在即静默（服务此刻是故意停的）。
+# abort 时删除（服务会拉回来），成功则留着（旧 VM 随 job 销毁）。
+mkdir -p "$HANDOFF_STATE_DIR" 2>/dev/null || true
+: > "$HANDOFF_STATE_DIR/switching"
+
 # ── 2. 停本机自愈看门狗（必须在停隧道/停 AI 栈**之前**）──
 # openclaw-health 有「cftun-* 隧道自愈」：停掉的隧道 ≤5min 内会被它 sudo start
 # 拉回来 → 旧 VM 的 cloudflared connector 重新并入隧道 → 流量可能被路由到
 # 已停网关的旧机（用户侧表现为随机 5xx）。gateway-watchdog 只告警不重启，
 # zcode2api-proxy-watchdog 会拉起 node 代理 —— 一并暂停。旧 VM 随 job 销毁，
 # 无需恢复；继任 VM 的看门狗由新 run 自己安装（自带启动宽限期）。
-systemctl --user stop openclaw-health.timer gateway-watchdog.timer \
+# 除了 timer，**连 service 一起停**：停 timer 只拦后续触发，已在跑的 oneshot
+# 仍会探测到「服务已停」并发出误报（2026-11-11 实测）。
+systemctl --user stop openclaw-health.timer openclaw-health.service \
+  gateway-watchdog.timer gateway-watchdog.service \
   zcode2api-proxy-watchdog.timer 2>/dev/null || true
 echo "✅ [cutover] 本机自愈看门狗已暂停（防交接期间拉回隧道/服务）"
 
