@@ -219,6 +219,34 @@ if [ "${OPENCLAW_AI_EARLY:-}" = "1" ] && [ -f "$GITHUB_WORKSPACE/.github/scripts
 fi
 
 
+# ── 3.6 增量同步完成后立刻把 openclaw 让给继任者 ──
+# 2026-11-11 实测事故链：旧 VM 一直占着 Tailscale 名 `openclaw` 直到 job 结束
+# （22:43:22），继任者只能叫 openclaw-1，回收守护 120s 一轮 → 22:47:02 才收回。
+# 期间客户端的 `openclaw` 域名指向这台**已停服**的机器（22:35–22:47，约 12 分钟）：
+# 连接失败、用户输入无处落地。会话库本身没丢（序列连续），但体验上就是断线。
+# 修法：等继任者报 rsync_done（数据已到手）后，旧 VM 改名让位 ——
+# 用改名而不是 logout，旧 VM 仍在 tailnet，万一后续回退还能被访问。
+if [ -n "${SID:-}" ]; then
+  _rns=""; _renamed=0
+  for _i in $(seq 1 120); do   # ≤10min
+    _rns="$(handoff_new_state "$SID")"
+    case "$_rns" in rsync_done|serving) _renamed=1; break ;; esac
+    case "$_rns" in aborted) break ;; esac
+    sleep 5
+  done
+  if [ "$_renamed" = 1 ]; then
+    stop_rsyncd
+    _retired="openclaw-retired-${GITHUB_RUN_ID:-x}"
+    if sudo -n tailscale set --hostname="$_retired" >/dev/null 2>&1; then
+      echo "✅ [cutover] 增量已同步 → 本机改名 ${_retired}，openclaw 让给继任者"
+    else
+      echo "⚠️ [cutover] 改名让位失败（继任者仍可能顶着 openclaw-1）"
+    fi
+  else
+    echo "ℹ️ [cutover] 未见 rsync_done（state=${_rns:-?}），不改名（保留回退可达性）"
+  fi
+fi
+
 echo "🤝 [cutover] 已交出（handing_over），等继任者 serving（≤${HANDOFF_SERVING_WAIT_SEC}s）…"
 bash "$GITHUB_WORKSPACE/.github/scripts/handoff/handoff-notify.sh" cutover \
   "old_run=${GITHUB_RUN_ID}" "new_run=${SID}" || true

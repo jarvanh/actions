@@ -131,11 +131,20 @@ _rebind_serves() {
   echo "[ts-reclaim] $(date -u +%FT%TZ) 🔁 serve 重建完成: 成功 ${_ok} 条, 失败 ${_fail} 条"
 }
 
+# 2026-11-11：交接后前 5 分钟快速轮询（15s），之后回到 120s 常态。
+# 原实现「先 sleep 120 再检查」→ 最早一次尝试在启动后 2 分钟；叠加旧 VM 迟迟
+# 不放名字，实测 22:38:34 serving → 22:47:02 才收回，客户端 12 分钟连到死节点。
+# 现在旧 VM 会在 rsync_done 后主动改名让位（cutover.sh 3.6），这里配合快轮询，
+# 通常能在交出后 1-2 分钟内收回。僵尸清理依赖控制面收敛，前 5 分钟每 4 轮做一次即可。
+_round=0
 while true; do
-  _purge_stale
-  sleep 120
+  _round=$((_round + 1))
+  if [ "$_round" -le 20 ]; then _pause=15; else _pause=120; fi
+  if [ "$_round" -eq 1 ] || [ $((_round % 4)) -eq 0 ] || [ "$_round" -gt 20 ]; then
+    _purge_stale
+  fi
   CUR="$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName // empty' | sed 's/\.$//')"
-  [ -z "$CUR" ] && continue
+  [ -z "$CUR" ] && { sleep "$_pause"; continue; }
 
   if [ "$CUR" = "$TARGET" ]; then
     _rebind_serves
@@ -149,6 +158,7 @@ while true; do
     exit 0
   fi
 
-  echo "[ts-reclaim] $(date -u +%FT%TZ) 仍为 ${CUR}，重试回收"
+  echo "[ts-reclaim] $(date -u +%FT%TZ) 仍为 ${CUR}，重试回收（第 ${_round} 轮）"
   _reclaim_once
+  sleep "$_pause"
 done
