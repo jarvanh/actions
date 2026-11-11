@@ -131,6 +131,23 @@ OPENLIST_PAIR_MIN_SLICE_SECONDS="${OPENLIST_PAIR_MIN_SLICE_SECONDS:-1200}"  # 20
 #   （全局预算仍用 OPENLIST_SYNC_MIN_SLICE_SECONDS / 修复预留，语义不变）
 OPENLIST_PAIR_TAIL_RESERVE_SECONDS="${OPENLIST_PAIR_TAIL_RESERVE_SECONDS:-120}"
 
+# ===== 本轮"目标端配额已满"标记（2026-11-12 加）=====
+# 由 sync_engine.sh 在检测到 `403 storage quota has exceeded`（Google Drive 等）
+# 时写入；并行调度据此**跳过同后端其余同步对**。
+# 现场（run 43001486184）: gd:backup 传了 4.741 GiB 后撞
+#   `googleapi: Error 403: The user's Drive storage quota has been exceeded.`，
+#   rclone 内部 --retries 3、每次约 3 分钟 ⇒ 一个 gd 对白烧 ~13 分钟；
+#   一轮 5 个 gd 对 ≈ 65 分钟（占 320 分钟预算 20%），且必然 0 产出。
+# 为什么可以用 /tmp 且不跨轮: 跑的每轮都是新 runner，/tmp 天然清空 ⇒
+#   容量一旦恢复，下一轮自动重新参战（不需要 TTL/清理逻辑）。
+_quota_flag_path() {
+  printf '%s/ol_quota_exhausted_%s' "${OPENLIST_QUOTA_FLAG_DIR:-/tmp}" \
+    "$(printf '%s' "${1:-}" | tr '/:' '__')"
+}
+_quota_backend_flagged() {
+  [ -f "$(_quota_flag_path "${1:-}")" ]
+}
+
 # 收割一个完成的同步对 worker（阻塞轮询；结果文件为准 + kill -0 兜底，
 # 与 _sync_par_reap_one 同策略: wait -n -p 对被杀子进程不回填 pid）
 _pairs_parallel_reap_one() {
@@ -227,7 +244,7 @@ _run_registry_pairs_parallel() {
   [ "$_par" -lt 2 ] && _par=2
   local _pp_dir="/tmp/ol_pairs_$(date +%s)_${BASHPID:-$$}"
   mkdir -p "$_pp_dir"
-  declare -A _pp_pid=() _pp_be=() _pp_dst=() _busy_be=() _started=()
+  declare -A _pp_pid=() _pp_be=() _pp_dst=() _busy_be=() _started=() _quota_logged=()
   # 这几个是"调用方局部": _pairs_parallel_reap_one 靠 bash 动态作用域改它们，
   # 因此既不能声明在 reap 内部（改了看不见），也不能不声明（会污染全局）
   local _pp_n="$n" _done_n=0 _failed_n=0 _trunc_n=0 total_transferred=0
@@ -242,6 +259,21 @@ _run_registry_pairs_parallel() {
       _e="${SYNC_TASK_REGISTRY[$idx]}"
       IFS='|' read -r _ _ _dst _ _ <<< "$_e"
       _be=$(_task_backend_root_of "$_dst")
+      # 目标端配额已满（本轮内其他 gd 对已实证 403）→ 跳过，别再烧重试
+      if _quota_backend_flagged "$_be"; then
+        if [ -z "${_quota_logged[$_be]:-}" ]; then
+          echo "🈵 后端 ${_be} 本轮已判「配额已满」，跳过其剩余同步对（第 $((idx + 1))/${n} 个起；扩容/清理后下轮自愈）"
+          _quota_logged[$_be]=1
+        fi
+        _started[$idx]=1
+        _done_n=$((_done_n + 1))
+        {
+          printf 'status=skipped\n'
+          printf 'transferred=0\n'
+          printf 'backend=%s\n' "$_be"
+        } > "${_pp_dir}/${idx}.done" 2>/dev/null || true
+        continue
+      fi
       if [ -z "${_busy_be[$_be]:-}" ]; then _pick=$idx; _pick_be="$_be"; break; fi
     done
     if [ "$_pick" -ge 0 ] && [ "$_running" -ge "$_par" ]; then

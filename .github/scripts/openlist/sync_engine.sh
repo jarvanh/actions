@@ -566,6 +566,35 @@ sync_with_logging() {
     SYNC_STATUS=0
   fi
 
+  # ===== 目标端配额已满 ⇒ 终态错误，快速失败（2026-11-12 加）=====
+  # 现场（run 43001486184，gd:backup）:
+  #   `googleapi: Error 403: The user's Drive storage quota has been exceeded.`
+  #   实际配额: Used 2.883 TiB / Total 15 GiB（付费容量掉了）⇒ 任何写入必失败。
+  #   当时的浪费: rclone 内部 --retries 3，每次 ~3 分钟，一个 gd 对白烧 ~13 分钟；
+  #   一轮 5 个 gd 对 ≈ 65 分钟（占 320 分钟预算 20%），且必然 0 产出。
+  # 做法: 识别该错误 → ①判失败（这是真错误，不是到点交棒）②写"本轮该后端配额满"
+  #   标记，供并行调度跳过同后端其余同步对 ③跳过镜像清理/truth-check/修复管线
+  #   （配额满时它们全是空转）④发一条明确的人话告警，指向"扩容或清理"。
+  # 为什么必须快速失败: 配额是**账号侧终态**，重试再多次也不会自愈 —— 与登录
+  #   "被拒即 fail fast"同一判断（见 openlist_api.sh _get_openlist_token 注释）。
+  local _quota_hit=0
+  if [ -f "$LAST_ATTEMPT_LOG" ] \
+     && grep -qiE 'storage quota has been exceeded|quota exceeded|storageQuotaExceeded' "$LAST_ATTEMPT_LOG" 2>/dev/null; then
+    _quota_hit=1
+  fi
+  if [ "$_quota_hit" -eq 1 ]; then
+    local _qroot
+    _qroot=$(_backend_root_of "$dest_path" 2>/dev/null || echo "$dest_path")
+    echo "🈵 目标端配额已满（${_qroot}）: 写入被服务端拒绝 → 本轮跳过该后端其余同步对（扩容/清理容量后自愈，非代码问题）"
+    SYNC_FAILED=1
+    SYNC_TIME_EXHAUSTED=0
+    : > "${OPENLIST_QUOTA_FLAG_DIR:-/tmp}/ol_quota_exhausted_$(printf '%s' "$_qroot" | tr '/:' '__')" 2>/dev/null || true
+    # 配额满时的下游全无意义: 直接收尾（不清理、不 truth-check、不修复、不重试）
+    _sync_serialize_fixed_files 2>/dev/null || true
+    _sync_accumulate_fixed_results 2>/dev/null || true
+    return 0
+  fi
+
   # ===== 目标端镜像清理（受控 delete 通道）=====
   # 位置: initial sync 之后、重试链之前 —— 423/409 重传会把误删的源端文件
   #   重新传回（copy 不删除，但 rclone 内部 attempt 仍按文件清单跑），清理
