@@ -26,7 +26,7 @@
 | OpenList 同步 | `.github/scripts/openlist/`（`load_all.sh` 注入真源；`telegram.sh` 的 `send_telegram_message` 统一出口） | 任务预览、进度面板、同步结果、跳过、源端异常、存储账号失效、修复/还原/灾难恢复、趋势、分卷、演练 | 结果与流水**普通**；源端大小异常减小 / 存储账号失效 / 落盘校验降级 / 灾难恢复 **alert**；进度面板与 `sendDocument` 直连主 bot，不参与路由 |
 | Telegram 频道视频 | `.github/scripts/tg-channel/`（`sync_to_tg.sh` 等） | 频道同步汇总、单文件级失败、去重、残留清理、频道清理、媒体 caption | 全**普通**；caption 不走 sendMessage 发送层 |
 | 备份与任务结果 | workflow 内联（`github_backup_all.yml`、`self-hosted_backup.yml`、`icloud-photos-downloader.yml`、`pixivutil2.yml`、`ph-dl.yml`、`p.yml`） | 备份四态、iCloud 三态、Pixiv 五态、ph-dl 损坏与收藏夹同步、vaultwarden 恢复失败 | 备份成功**普通**，异常 / 失败 / 中断 **alert**；iCloud **全普通**；ph-dl 结果与损坏**普通**、整轮崩溃兜底 **alert**；Pixiv 失败与未运行 **alert**，其余普通 |
-| OpenClaw Runner | `.github/workflows/openclaw.yml` + `.github/scripts/openclaw/run-*.sh` | 入口与凭据、自愈、归档、配额预检、keepalive、接力、AI 网关部署 | **alert**，例外三条**普通**：keepalive 收尾预警、新 run 已启动、AI 网关用量报告 |
+| OpenClaw Runner | `.github/workflows/openclaw.yml` + `.github/scripts/openclaw/run-*.sh` | 入口与凭据、自愈、归档、配额预检、keepalive、接力、AI 网关部署 | **alert**，例外四条**普通**：keepalive 收尾预警、新 run 已启动、AI 网关用量报告、交接进度（准备/就绪/已交出/已上线/完成，见 `.github/scripts/handoff/handoff-notify.sh`） |
 | AI 网关（workbuddy / trae2api / zcode2api / qingyan / autoclaw / qoder2api） | `.github/scripts/openclaw/run-*.sh` | 就绪 / 降级 / 鉴权失败 / 风控停用 / 停服 | **alert**；`⏭️ qingyan-proxy 已跳过` **普通** |
 | Emby | `.github/workflows/emby.yml` | 服务启停、直链回退、播放通知 | 启停与回退 **alert**；播放 **普通** |
 | 测速三套 | `.github/scripts/proxy-speedtest/speedtest_common.py` | CDN / Gitee / 泰尔三网主报告、异常退出与终止兜底 | 主报告**普通**；❌ 异常退出 / ⛔ 异常终止 **alert** |

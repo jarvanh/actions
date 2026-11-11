@@ -31,7 +31,11 @@ while :; do
     [ -n "$ref" ] || ref="$(rclone cat "${HANDOFF_REMOTE_DIR}/timing.json" 2>/dev/null | jq -r '.stop_epoch // empty' 2>/dev/null || true)"
     case "${ref:-}" in ''|*[!0-9]*) ref=0 ;; esac
     if [ "$ref" -gt 0 ] 2>/dev/null; then
-      echo "★ 整体上线：旧轮停机 → 全部服务可用 = $(( $(date +%s) - ref ))s"
+      _total=$(( $(date +%s) - ref ))
+      echo "★ 整体上线：旧轮停机 → 全部服务可用 = ${_total}s"
+      _ai="Dropbox 回退"; [ -f /tmp/handoff-ai-fast.ok ] && _ai="rsync 直装"
+      bash "$here/handoff-notify.sh" full "downtime=$_total" "ai=$_ai" \
+        "run=${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID:-0}" || true
     else
       echo "★ 整体上线（无停机基准，单看本轮耗时 $(( $(date +%s) - P0 ))s）"
     fi

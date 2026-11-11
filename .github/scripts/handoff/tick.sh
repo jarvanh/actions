@@ -43,6 +43,8 @@ if [ ! -f "$SID_FILE" ] && [ "$REMAIN" -gt 0 ] && [ "$REMAIN" -le "$TRIGGER_AT" 
     if [ -n "$_sid" ]; then
       echo "$_sid" > "$SID_FILE"
       : > "$ENABLED"
+      bash "$here/handoff-notify.sh" prepare "old_run=$GITHUB_RUN_ID" "new_run=$_sid" \
+        "eta=$(( REMAIN / 60 ))" || true
       echo "[handoff-tick] ✅ 交接已武装：继任者 run=$_sid（T-4min 前须 ready，否则被看门狗取消）"
     else
       echo "[handoff-tick] ⚠️ 触发成功但 60s 内拿不到新 run id，交接放弃 → 死线走传统收尾"

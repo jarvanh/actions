@@ -45,6 +45,7 @@ abort_takeover() { # <原因>
   exit 1
 }
 
+_TAKEOVER_T0=$(date +%s)
 echo "[takeover] 继任轮接管开始（old_run=${HANDOFF_OF}）"
 
 # ── 1. 基座在场校验（Install OpenClaw / Restore ZCode 都在前序步骤完成）──
@@ -53,6 +54,7 @@ echo "[takeover] 继任轮接管开始（old_run=${HANDOFF_OF}）"
 # ── 2. ready 标记：旧轮的 T-4min 看门狗认的就是它 ──
 handoff_put "$HANDOFF_NEW_REMOTE" "$(handoff_new_json ready)"
 echo "✅ [takeover] ready 已写（等旧轮死线交出，≤${HANDOFF_CUTOVER_WAIT_SEC}s）"
+bash "$here/handoff-notify.sh" ready "elapsed=$(( $(date +%s) - _TAKEOVER_T0 ))" || true
 
 # ── 3. 等 CUTOVER（盯标记 + 盯旧轮 run 死活）──
 _ns=""

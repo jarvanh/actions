@@ -14,6 +14,11 @@ handoff_is_successor || exit 0
 
 handoff_put "$HANDOFF_NEW_REMOTE" "$(handoff_new_json serving)"
 echo "🎉 [serving] new.json=serving 已写 —— 旧轮收到后 handoff_done，下线窗口就此关闭"
+_cut="$(handoff_get "$HANDOFF_OLD_REMOTE" '.cutoff_epoch')"
+case "${_cut:-}" in ''|*[!0-9]*) _cut=0 ;; esac
+_dt=0; [ "$_cut" -gt 0 ] && _dt=$(( $(date +%s) - _cut ))
+_ai="Dropbox 回退"; [ -f /tmp/handoff-ai-fast.ok ] && _ai="rsync 直装"
+bash "$here/handoff-notify.sh" serving "downtime=$_dt" "ai=$_ai" || true
 
 # ── 主机名回收（等效 Enable Tailscale SSH 步的守护，但目标是交接后的名字）──
 _dns="$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName // empty' 2>/dev/null | head -n 1 || true)"

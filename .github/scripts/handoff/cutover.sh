@@ -169,6 +169,8 @@ fi
 
 
 echo "🤝 [cutover] 已交出（handing_over），等继任者 serving（≤${HANDOFF_SERVING_WAIT_SEC}s）…"
+bash "$GITHUB_WORKSPACE/.github/scripts/handoff/handoff-notify.sh" cutover \
+  "old_run=${GITHUB_RUN_ID}" "new_run=${SID}" || true
 _chk=0
 for _i in $(seq 1 $(( HANDOFF_SERVING_WAIT_SEC / 5 ))); do
   _ns="$(handoff_new_state "$SID")"

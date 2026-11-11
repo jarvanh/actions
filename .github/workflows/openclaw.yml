@@ -1485,6 +1485,11 @@ jobs:
         # 校验；之后各服务步骤经 gate 放行，从「同步后的新鲜状态」起服务。
         # 失败 = 自我取消整个 run（数据零丢失由旧轮传统收尾兜底，见脚本头注释）。
         if: ${{ !cancelled() && inputs.handoff_of != '' }}
+        env:
+          # 交接进度通知（ready 阶段）需要
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/scripts/handoff/takeover.sh"
 
@@ -1918,6 +1923,11 @@ jobs:
         # /tmp/run-openclaw-step.log、meta.env 等消费方不变。
         # 脚本非零退出即本步骤失败（outcome 消费方不受影响，id 保留）。
         if: ${{ !cancelled() && steps.install_openclaw.outcome == 'success' }}
+        env:
+          # 交接进度通知（serving 阶段）需要
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/run-openclaw.sh"
           # 2026-11-10 Phase 1：继任轮网关健康后回报 serving —— 旧轮 cutover 等的就是
