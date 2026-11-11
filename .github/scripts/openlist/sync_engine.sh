@@ -547,6 +547,25 @@ sync_with_logging() {
 
   run_rclone_sync_once "initial sync" || SYNC_STATUS=$?
 
+  # ===== 预算/份额到点被 timeout 收掉 ⇒ 是"到点交棒"，不是失败 =====
+  # 2026-11-11 加（run 42887432510 实证）:
+  #   rc=124 只可能来自本文件包在外面的 `timeout ${_st_tmo}`（GNU timeout 的
+  #   专属退出码），含义是"预算/份额到点被收掉"，**不是数据错误**。
+  #   但下游判据是 `sync_status != 0` 即失败 ⇒ 每个被份额截断的直连对都被记成
+  #   「同步失败」: 现场 gd:1 `0 B / 0 B, 0 B/s` 收尾 failed；两个轮次各 15/21
+  #   判失败里有一大批属于这种。三个连带伤害:
+  #     ① 发「同步失败」告警（用户看到假故障）；
+  #     ② _sync_task_finalize 见 SYNC_FAILED≠0 会对 openlist 目标调用
+  #        split_on_sync_failure（真去切大文件）—— 被假失败触发；
+  #     ③ 父级按 failed 聚合子目录，统计与事实不符。
+  #   份额机制让"到点截断"成为常态（每个大对每轮都会遇到），故必须改语义。
+  #   只在 rc=124 时降级: 真失败（4xx/5xx/连接断）退出码不是 124，不受影响。
+  if [ "$SYNC_STATUS" -eq 124 ]; then
+    echo "⏳ initial sync 被预算/份额上限截断（rc=124）→ 按「到点交棒」处理: 不判失败、不进重试链、不触发大文件切割（未传部分下轮接力）"
+    SYNC_TIME_EXHAUSTED=1
+    SYNC_STATUS=0
+  fi
+
   # ===== 目标端镜像清理（受控 delete 通道）=====
   # 位置: initial sync 之后、重试链之前 —— 423/409 重传会把误删的源端文件
   #   重新传回（copy 不删除，但 rclone 内部 attempt 仍按文件清单跑），清理
@@ -637,6 +656,15 @@ sync_with_logging() {
   _sync_parse_object_not_found
 
   # 发送同步结果通知
+  # 重试链（8005/423/409）内也可能再次被 timeout 收掉（各自 run_rclone_sync_once
+  # 共用同一 _slice_cap_seconds 包装）⇒ 调用方若在链尾才拿到 124，仍会被判失败。
+  # 故在**交给通知层之前**再归一化一次（与 initial sync 后那次同义，见其注释）。
+  if [ "$SYNC_STATUS" -eq 124 ]; then
+    echo "⏳ 重试链末尾仍被预算/份额上限截断（rc=124）→ 按「到点交棒」处理（不判失败）"
+    SYNC_TIME_EXHAUSTED=1
+    SYNC_STATUS=0
+  fi
+
   _send_sync_result_notification \
     "$source_path" "$dest_path" "$task_name" "$SYNC_STATUS" \
     "$LOG_FILENAME" "$LAST_ATTEMPT_LOG" \
