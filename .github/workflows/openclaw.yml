@@ -1493,6 +1493,57 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/scripts/handoff/takeover.sh"
 
+      - name: AI 网关优先恢复（交接轮：交出后立刻派发，OmniRoute 靠等齐门最后起）
+        id: ai_priority_restore
+        # 2026-11-11 主人定优先级：交接后**先恢复各个 AI 网关**，其他服务可以稍后；
+        # OmniRoute 由 run-ai-gateway.sh 的 P5b 等齐门保证最后起（它依赖 6 个上游）。
+        # zcode 基座在 Tailscale 之前（step 12 < 16）已满足，不受本步骤影响。
+        # 普通轮不走这里（仍走既有的 early-dispatch + 各 Run 步骤）。
+        if: ${{ !cancelled() && inputs.handoff_of != '' }}
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
+          TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          WB_GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ZCODE_GATEWAY_KEY: ${{ secrets.ZCODE_GATEWAY_API_KEY }}
+          QINGYAN_REFRESH_TOKEN: ${{ secrets.GLM_REFRESH_TOKEN }}
+          QINGYAN_GATEWAY_KEY: ${{ secrets.GLM2API_GATEWAY_KEY }}
+          QINGYAN_PORT: "8320"
+          QINGYAN_APP_REMOTE: dropbox:self-hosted/qingyan-proxy/app
+          QINGYAN_DATA_DIR: /dropbox/self-hosted/qingyan-proxy/data
+          QINGYAN_STATE_DIR: /dropbox/self-hosted/qingyan-proxy/data
+          QINGYAN_ENV_FILE: /dropbox/self-hosted/qingyan-proxy/env.sh
+          AUTOCLAW_GATEWAY_KEY: ${{ secrets.AUTOCLAW_GATEWAY_KEY }}
+          AUTOCLAW_REPO: https://github.com/jarvanh/autoclaw-proxy.git
+          AUTOCLAW_SNAPSHOT_REMOTE: dropbox:self-hosted/autoclaw-proxy/auth-snapshot.json
+          AUTOCLAW_STATS_REMOTE: dropbox:self-hosted/autoclaw-proxy/lifetime_stats.json
+          AUTOCLAW_PORT: "8322"
+          AI_BACKEND_INPUT: ${{ inputs.ai_backend || 'auto' }}
+        run: |
+          set -uo pipefail
+          OC_DIR="${GITHUB_WORKSPACE}/.github/scripts/openclaw"
+          # AI 数据必须等旧轮「交出后冻结」才算新鲜（零丢失），所以闸门仍在这里等，
+          # 但只等 AI 快照，不等整段最终归档。
+          _gate=ai_archives_done; [ "${OPENCLAW_AI_EARLY:-}" != "1" ] && _gate=archives_done
+          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/gate.sh" "$_gate" || true
+          _dispatched=0
+          for _u in workbuddy trae2api zcode2api qingyan qoder2api autoclaw; do
+            [ -f "/tmp/upstream-rc-$_u" ] && continue
+            bash -eo pipefail "$OC_DIR/run-$( [ "$_u" = qingyan ] && echo qingyan || echo "$_u" ).sh" \
+              || echo "::warning::[ai-priority] $_u 返回非零（收口 step 兜底）"
+            _dispatched=$((_dispatched + 1))
+          done
+          echo "🚀 [ai-priority] 已派发 ${_dispatched}/6 上游；OmniRoute 由 AI 网关步骤的等齐门最后起"
+          # AI 网关本体也在这里起：内部 P5b 等齐门会等上面 6 个 rc 就绪，
+          # 因此 OmniRoute 天然是最后起的那个（主人要求）。
+          bash -eo pipefail "$OC_DIR/run-ai-gateway.sh" \
+            || echo "::warning::[ai-priority] run-ai-gateway 返回非零（降级链已尽力）"
+          : > /tmp/ai-gateway-started
+          echo "✅ [ai-priority] AI 网关已拉起（收口在 post-cutover，避免重复启动）"
+
       - name: Run workbuddy-gateway (check update first, then serve)
         id: run_workbuddy
         # 2026-10-22 步骤重排后位于 Run OpenClaw 之后：本步失败不得级联跳过
@@ -2143,23 +2194,16 @@ jobs:
         run: |
           set -uo pipefail
           OC_DIR="${GITHUB_WORKSPACE}/.github/scripts/openclaw"
-          # AI 侧闸门：默认等 archives_done（AI 栈在线到归档后，基线时序 ~213s）；
-          # OPENCLAW_AI_EARLY=1 时才改为等交出瞬间快照（实测更慢，故默认关）。
-          _gate=archives_done; [ "${OPENCLAW_AI_EARLY:-}" = "1" ] && _gate=ai_archives_done
-          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/gate.sh" "$_gate" || true
-          # 派发六上游（run-*.sh 调用即返回，真实部署在脚本内后台子壳；与 early-dispatch 同款）
-          _dispatched=0
-          for _u in workbuddy trae2api zcode2api qingyan qoder2api autoclaw; do
-            [ -f "/tmp/upstream-rc-$_u" ] && continue
-            bash -eo pipefail "$OC_DIR/run-$( [ "$_u" = qingyan ] && echo qingyan || echo "$_u" ).sh" \
-              || echo "::warning::[post-cutover] $_u 脚本返回非零（部署后台进行中或失败）"
-            _dispatched=$((_dispatched + 1))
-          done
-          echo "🚀 [post-cutover] 已派发 ${_dispatched}/6 上游（gate 放行，数据=旧轮最终归档）"
-          # AI 网关（OMNIROUTE_PRESTART 未设 → 脚本走同步恢复+起容器全路径；
-          # 内部自带 P5b 等齐门，会等上面六个 rc 就绪）
-          bash -eo pipefail "$OC_DIR/run-ai-gateway.sh" \
-            || echo "::warning::[post-cutover] run-ai-gateway 返回非零（降级链已尽力，详见脚本日志）"
+          # 2026-11-11 优先级重排：6 个上游 + AI 网关已由「AI 网关优先恢复」步骤
+          # 在交接完成后立刻派发（本步骤在 Run OpenClaw 之后，太晚）。这里只做
+          # AI 网关收口（等齐门/健康判定仍在 run-ai-gateway.sh 内，OmniRoute 最后起）。
+          # 幂等：若 ai-priority 已把 run-ai-gateway 跑起来（rc 文件在），此处跳过。
+          if [ ! -f /tmp/ai-gateway-started ]; then
+            bash -eo pipefail "$OC_DIR/run-ai-gateway.sh" \
+              || echo "::warning::[post-cutover] run-ai-gateway 返回非零（降级链已尽力）"
+          else
+            echo "⏭️ [post-cutover] AI 网关已由 ai-priority 步骤起过，跳过重复启动"
+          fi
           # 2026-11-10：AI 整包直取是后台进程，结果只落在 /tmp；这里显式回显，
           # 否则「直取到底成没成功」在 step 日志里完全不可见 —— 生产首轮就是
           # 因为这样看起来「从来没成功过」。
