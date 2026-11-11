@@ -720,6 +720,30 @@ _slice_cap_seconds() {
   echo "$tmo"
 }
 
+# ===== 从源端清单快照推算子目录大小（2026-11-11 加）=====
+# 用法: _subdir_sizes_from_snapshot <stem>  → stdout 每行 "<bytes>\t<一级子目录>"
+# 数据源: sync_marker.sh 的 save_source_listing_snapshot 在写 marker 时落下的
+#   `<stem>.listing.json.gz`（全量源端清单: 路径<TAB>字节）。本地求和即可，
+#   **零远程列举** —— 这是治"递归层重复全量列举吃掉整个份额"的关键。
+# 失败语义: 快照不存在/下载失败/为空 → 返回 1（调用方回退到 rclone size 列举）。
+#   覆盖不全（有新子目录）由调用方检查，本函数只负责"能算多少算多少"。
+# 为什么用 rclone cat 而不是 copy: 快照只有几十 KB，cat 直接进管道，不落盘。
+_subdir_sizes_from_snapshot() {
+  local stem="${1:-}"
+  [ -n "$stem" ] || return 1
+  declare -F _listing_snapshot_path >/dev/null 2>&1 || return 1
+  local snap
+  snap=$(_listing_snapshot_path "$stem" 2>/dev/null) || return 1
+  [ -n "$snap" ] || return 1
+  local _tmo="${OPENLIST_SNAPSHOT_FETCH_TIMEOUT:-60}"
+  [[ "$_tmo" =~ ^[0-9]+$ ]] || _tmo=60
+  # 路径形如 "a/b/c.jpg" ⇒ 按第一段聚合；根级文件（无 /）不计入任何子目录
+  timeout "$_tmo" rclone cat "$snap" 2>/dev/null \
+    | gunzip -c 2>/dev/null \
+    | awk -F'\t' 'NF>=2 && $2 ~ /^[0-9]+$/ { n=split($1,p,"/"); if (n>1) s[p[1]]+=$2 } END { for (k in s) printf "%s\t%s\n", s[k], k }'
+  return 0
+}
+
 # ===== 单同步对的公平份额（2026-11-10 加，动因见 OPENLIST_PAIR_MIN_SLICE_SECONDS）=====
 # 语义: min(剩余可用预算, max(下限, 剩余可用预算 / 尚需服务对数))
 #   剩余可用预算 = _budget_slice_seconds（已扣尾部预留）；未注入预算锚点 → 输出空
@@ -1558,6 +1582,47 @@ _sync_task_impl() {
     subdir_size_map["$_sz_only"]=$_sz_only_bytes
     sorted_subdirs="${_sz_only_bytes} ${_sz_only}"$'\n'
   else
+  # ===== 优先用源端清单快照算子目录大小（2026-11-11 加）=====
+  # 动因: 单子目录跳过枚举只治了**最外层**。task1 递归进 `1024j`（782 GiB /
+  #   约 20 万文件）后，这一层仍要对每个子目录跑 `rclone size`（全递归列举），
+  #   实测最外层一次就 7min44s（run 42887432510: 19:59:19 → 20:07:23），
+  #   20 分钟份额被列举吃光 ⇒ 该对 0 B。而系统本来就在写 marker 时存了一份
+  #   源端完整清单快照 `<stem>.listing.json.gz`（路径+字节，见 sync_marker.sh
+  #   save_source_listing_snapshot），**直接本地求和即可，零远程列举**。
+  # 安全边界: 快照缺失/下载失败/覆盖不全（有新子目录）→ 一律回退到原列举路径，
+  #   行为与改动前完全一致；大小只用于"小的先同步"的排序，陈旧也不影响正确性。
+  local _snap_ok=0
+  if declare -F _listing_snapshot_path >/dev/null 2>&1; then
+    local _snap_stem _snap_out _snap_tmp
+    _snap_stem="${task_name}_$(printf '%s' "${task_name}_${dest_path}" | md5sum | cut -c1-8)"
+    _snap_tmp="/tmp/ol_szsnap_$(date +%s)_${BASHPID:-$$}"
+    if _snap_out=$(_subdir_sizes_from_snapshot "$_snap_stem" 2>/dev/null) && [ -n "$_snap_out" ]; then
+      declare -A _snap_map=()
+      while IFS=$'\t' read -r _sb _sn; do
+        [ -n "$_sn" ] && _snap_map["$_sn"]="$_sb"
+      done <<< "$_snap_out"
+      # 覆盖检查: 当前每个子目录都必须在快照里，否则回退（新目录没有大小）
+      local _cover=1 _chk
+      while IFS= read -r _chk; do
+        [ -z "$_chk" ] && continue
+        [ -z "${_snap_map[$_chk]:-}" ] && { _cover=0; break; }
+      done <<< "$subdirs"
+      if [ "$_cover" -eq 1 ]; then
+        local _sn
+        while IFS= read -r _sn; do
+          [ -z "$_sn" ] && continue
+          subdir_size_map["$_sn"]="${_snap_map[$_sn]}"
+          echo "  ${_sn}: $(format_bytes "${_snap_map[$_sn]}")"
+          sorted_subdirs+="${_snap_map[$_sn]} ${_sn}"$'\n'
+        done <<< "$subdirs"
+        _snap_ok=1
+        echo "📋 子目录大小取自源端清单快照（${_snap_stem}），跳过 ${_sz_pre_count} 次全递归列举"
+      fi
+      unset _snap_map
+    fi
+    rm -f "$_snap_tmp" 2>/dev/null || true
+  fi
+  if [ "$_snap_ok" -ne 1 ]; then
   # 并行统计子目录大小（纯只读列举，无状态冲突；_rclone_size_json 单次
   # 1-3s，串行在 150+ 子目录的任务上要耗 5 分钟以上，8 路并行 <1 分钟）。
   # 结果按索引写临时文件回收，保持与串行完全一致的排序口径与日志输出
@@ -1600,6 +1665,7 @@ _sync_task_impl() {
     _sz_k=$((_sz_k + 1))
   done
   rm -rf "$_sz_dir"
+  fi   # ← 快照未覆盖时走列举（_snap_ok≠1）
   fi
   subdirs=$(echo "$sorted_subdirs" | sort -n | cut -d' ' -f2-)
 

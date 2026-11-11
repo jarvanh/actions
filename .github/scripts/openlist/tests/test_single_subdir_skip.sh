@@ -19,6 +19,7 @@ bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
 
 _REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 _SRC="$_REPO_ROOT/.github/scripts/openlist/task_engine.sh"
+WORK_DIR="$(mktemp -d)"; trap 'rm -rf "$WORK_DIR"' EXIT
 
 # --- 抽取被测代码块（源码原文，不是复写）---
 # 从"只有一个子目录时跳过大小枚举"注释起，到 else 分支末尾的 `fi`
@@ -32,6 +33,10 @@ echo "抽取行数: $(wc -l < /tmp/ss_block.sh)"
 grep -q '跳过大小枚举' /tmp/ss_block.sh || { echo "FATAL: 抽取失败(无注释头)"; exit 1; }
 grep -q '_rclone_size_json' /tmp/ss_block.sh || { echo "FATAL: 抽取失败(无列举分支)"; exit 1; }
 grep -q '^  fi$' /tmp/ss_block.sh || { echo "FATAL: 抽取失败(无收尾 fi)"; exit 1; }
+# 快照分支的辅助函数也抽真源（不是复写）
+sed -n '/^_subdir_sizes_from_snapshot()/,/^}$/p' "$_SRC" > "$WORK_DIR/snapfn.sh"
+[ -s "$WORK_DIR/snapfn.sh" ] || { echo "FATAL: 抽取 _subdir_sizes_from_snapshot 失败"; exit 1; }
+source "$WORK_DIR/snapfn.sh"
 
 format_bytes() { echo "$1"; }
 # 真源按 jq 取字段；这里用 sed 等价实现（桩返回 0 会让所有大小相同、排序断言失效）
@@ -54,6 +59,8 @@ _rclone_size_json() {
 
 run_block() {  # $1=subdirs(多行)  $2=source_path  $3=source_size_bytes
   local subdirs="$1" source_path="$2" source_size_bytes="$3"
+  # 快照分支会算 stem = task_name + md5(task_name_dest)，故必须提供这两个变量
+  local task_name="t_test" dest_path="gd:1"
   local sorted_subdirs=""
   declare -gA subdir_size_map=()
   declare -gA subdir_status_map=()
@@ -99,6 +106,46 @@ run_block "only" "onedrive:1" ""
   || bad "C1 映射=${subdir_size_map[only]:-空}"
 
 rm -f "$CALLS_FILE"
+# ---------- D. 快照可用时: 多子目录也零列举（2026-11-11 加）----------
+# 单子目录跳过只治最外层；task1 递归进 1024j（782 GiB / 20 万文件）后这一层
+# 仍会全递归列举。系统写 marker 时已存源端清单快照，直接本地求和即可。
+# 注: 真实 stem 由 md5(task_name_dest) 决定，测试无法预置 ⇒ 桩掉
+#     _listing_snapshot_path 指向固定文件（被测逻辑只关心"能不能读到快照"）。
+SNAP_DIR="$WORK_DIR/snap"; mkdir -p "$SNAP_DIR"
+SNAP_FILE="$SNAP_DIR/fixed.listing.json.gz"
+_listing_snapshot_path() { echo "$SNAP_FILE"; }
+# 桩 rclone: 只支持 cat（读快照）；其余调用记入 CALLS_FILE 视为"真去列举了"
+rclone() {
+  if [ "$1" = "cat" ]; then cat "$2"; return 0; fi
+  echo "UNEXPECTED rclone $*" >> "$CALLS_FILE"; return 0
+}
+printf 'big/a.mkv\t300\nbig/b.mkv\t100\nsmall/c.jpg\t50\n' | gzip -c > "$SNAP_FILE"
+
+: > "$CALLS_FILE"
+run_block $'big\nsmall' "onedrive:1" "999"
+_n=$(wc -l < "$CALLS_FILE")
+[ "$_n" = "0" ] && ok "D1 快照覆盖全部子目录 → 一次 rclone size 都没调用" \
+  || bad "D1 仍列举了 ${_n} 次"
+[ "${subdir_size_map[big]:-}" = "400" ] && ok "D2 快照求和正确（big=300+100）" \
+  || bad "D2 big=${subdir_size_map[big]:-空}"
+[ "${subdir_size_map[small]:-}" = "50" ] && ok "D3 small=50" || bad "D3 small=${subdir_size_map[small]:-空}"
+_ord=$(printf '%s' "$SORTED_OUT" | sort -n | cut -d' ' -f2- | tr '\n' ',')
+[ "$_ord" = "small,big," ] && ok "D4 仍按大小升序" || bad "D4 排序=[$_ord]"
+
+# ---------- D5. 快照缺新子目录 → 必须回退列举（不能把新目录当 0 字节）----------
+: > "$CALLS_FILE"
+run_block $'big\nbrandnew' "onedrive:1" "999"
+_n=$(wc -l < "$CALLS_FILE")
+[ "$_n" -ge 2 ] && ok "D5 快照未覆盖新子目录 → 回退列举（${_n} 次）" \
+  || bad "D5 未回退，列举次数=${_n}"
+
+# ---------- D6. 快照不存在 → 回退列举 ----------
+SNAP_FILE="$SNAP_DIR/does_not_exist.listing.json.gz"
+: > "$CALLS_FILE"
+run_block $'big\nsmall' "onedrive:1" "999"
+_n=$(wc -l < "$CALLS_FILE")
+[ "$_n" -ge 2 ] && ok "D6 无快照 → 回退列举（${_n} 次）" || bad "D6 未回退，列举次数=${_n}"
+
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
