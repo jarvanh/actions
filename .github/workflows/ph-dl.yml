@@ -70,6 +70,8 @@ jobs:
 
       # ============ 步骤1：清理 yt-dlp 残留文件 ============
       - name: cleanup yt-dlp residual files
+        # 清理是附加能力：失败不级联跳过后续；脚本内部「0 清理不发」自己判定
+        continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -78,6 +80,8 @@ jobs:
 
       # ============ 步骤2：检测并去重重复视频 ============
       - name: check duplicate videos by ID and dedupe by hash
+        # 去重是附加能力：失败不级联跳过上传，脚本内部按「发现重复组才发」处理
+        continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -121,6 +125,7 @@ jobs:
 
       # ============ 步骤5：yt-dlp 下载新增收藏并处理上传 ============
       - name: run ph-dl favorites
+        id: phdl_run
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID_PH }}
@@ -173,6 +178,8 @@ jobs:
           DOWNLOAD_TMP="/tmp/ph-dl-downloads"
           mkdir -p "$DOWNLOAD_TMP"
 
+          # 阶段标记：本步若中途失败，兜底通知据此说明卡在哪一步（见下一步）
+          printf '%s\n' "拉取收藏夹列表" > /tmp/ph-dl-stage
           BEFORE_COUNT=$(wc -l < archive.txt 2>/dev/null || echo 0)
 
           # 收藏夹总条数（远端 favorites 列表的实际长度，与本地库存是两回事）：
@@ -200,6 +207,7 @@ jobs:
 
           # 优先选择 H.264+AAC 流并合并为 MP4。仅 remux（不重编码），避免 ffmpeg 转码被中断导致 moov atom 缺失。
           # 下载到临时目录，process_ph_download.sh 验证完整性后写入 archive.txt（id|filename|url）并上传到 OneDrive。
+          printf '%s\n' "下载并处理新增收藏" > /tmp/ph-dl-stage
           yt-dlp -f "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/best[ext=mp4]/best" \
             --merge-output-format mp4 --remux-video mp4 --force-overwrites \
             --download-archive "$YT_DLP_ARCHIVE" --playlist-end 50 \
@@ -212,6 +220,8 @@ jobs:
           # NEW_CORRUPT = 本轮新增的损坏数（收尾标题恒 ✅，不再参与降级判定）；
           # 与库存里的累计损坏数（CORRUPT_VIDEOS）是两回事，别混用
           NEW_CORRUPT=0
+          # 目录可能因前面步骤失败而不存在：按「本轮没下载」处理，不因判空丢通知
+          DOWNLOAD_TMP="${DOWNLOAD_TMP:-/tmp/ph-dl-downloads}"
           if [ -f "$DOWNLOAD_TMP/corrupted.txt" ]; then
             # grep -c . 而非 wc -l：文件末行无换行符时 wc -l 会少计 1
             CORRUPTED_COUNT=$(grep -c . "$DOWNLOAD_TMP/corrupted.txt" || true)
@@ -272,6 +282,7 @@ jobs:
             FILE_LIST="无"
           fi
 
+          printf '%s\n' "汇总统计并发送通知" > /tmp/ph-dl-stage
           # 统一 HTML 版式 + 统一收尾区（散装消息合并为一条，明细树形列出）
           msg=""
           # 收尾恒 ✅（2026-09-28 语义修正）：损坏丢弃是「只能接受」的终态——
@@ -299,3 +310,39 @@ jobs:
           fi
           tg_add_footer msg
           send_tg_chunked "$msg"
+          # 汇总已发出：下一步的 always() 兜底据此避免重复推送
+          touch /tmp/ph-dl-summary-sent
+
+      # ============ 步骤6：汇总未发出时的兜底（失败/取消才发） ============
+      - name: "Notify: ph-dl 未完成兜底"
+        # 下载/上传步中途失败时，汇总通知（步骤5 末尾）根本走不到——独立成步 + always()
+        # 才能保证「这一轮出事」有人知道（规范 · 接线）。已发过汇总则跳过，不复读。
+        if: ${{ always() }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # 崩溃兜底走 alert 档（重要通知）：整轮没跑完属于「需人看一眼」的事件
+          TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
+          TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
+          PH_RUN_OUTCOME: ${{ steps.phdl_run.outcome }}
+        run: |
+          set -uo pipefail
+          if [ -f /tmp/ph-dl-summary-sent ]; then
+            echo "本轮汇总已发出，兜底跳过"
+            exit 0
+          fi
+          case "${PH_RUN_OUTCOME:-}" in
+            failure|cancelled) ;;
+            *) echo "本轮未失败（outcome=${PH_RUN_OUTCOME:-unknown}），兜底跳过"; exit 0 ;;
+          esac
+          # 先恢复环境再发（规范 · 失败与异常）：失败可能停在挂载/网络，这里只发文本
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+          STAGE=$(cat /tmp/ph-dl-stage 2>/dev/null || echo "任务启动")
+          msg=""
+          tg_add_title msg "❌ ph 收藏夹同步异常退出"
+          tg_add_kv msg "阶段" "$STAGE"
+          tg_add_kv msg "影响" "本轮未产出汇总；已下载的文件与频道内容不受影响"
+          tg_add_note msg "看收尾区运行日志定位；修好后直接重跑本 workflow（增量，不会重下已完成）"
+          tg_add_footer msg
+          send_tg_chunked "$msg" alert \
+            || echo "::warning::ph-dl 兜底通知发送失败（不影响任务结论）"

@@ -167,7 +167,7 @@ _send_sync_result_notification() {
       fi
       _fix_entries+="${_entry}"$'\n'
     done < "$fix_list"
-    # 超 8 条折叠交给真源 tree_fold（规范 · 折叠规则）：条目流已由 tg_entry* 构建（已转义、
+    # 超 8 条折叠交给真源 tree_fold（规范 · 折叠行）：条目流已由 tg_entry* 构建（已转义、
     # 已含 <code>），tree_fold 只截断 + 加折叠行；不能再走 tree_code_fold（二次转义），
     # 也不再自己手写 head -n 8 + 折叠行（此前是 tree_fold 的重复实现）
     fix_summary="$(tree_fold "${_fix_entries%$'\n'}")"$'\n'
@@ -186,7 +186,7 @@ _send_sync_result_notification() {
   #   rclone 原始报错、内部机制术语），一条通知里最难看的正是它；而日志片段的结论
   #   早已由第三列的失败原因概括。要看过程的读者走收尾区的运行日志链接。
   #   删掉子行后本列表回到「单行条目流」，折叠直接交给真源 tree_fold——
-  #   此前那套"按条目计数手写折叠行"的二层列表特例（规范 · 折叠规则）随之作废。
+  #   此前那套"按条目计数手写折叠行"的二层列表特例（规范 · 折叠行）随之作废。
   local fail_summary=""
   local fail_total=0
   if [ -s "$fail_list" ]; then

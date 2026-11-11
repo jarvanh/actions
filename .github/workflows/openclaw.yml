@@ -306,24 +306,24 @@ jobs:
             tail -20 /opt/logs/rclone-dropbox.log 2>/dev/null || true
             sudo dmesg 2>/dev/null | grep -i apparmor | tail -5 || true
             journalctl --user -u rclone-dropbox -n 20 --no-pager 2>/dev/null || true
-            # 系统级故障必须主动告知（2026-11-10 1033 事故教训：挂了 3 小时无人知）
-            if [ -n "${TELEGRAM_BOT_TOKEN_ALERT:-}" ]; then
-              source "$GITHUB_WORKSPACE/.github/scripts/telegram/tg_notify.sh"
-              # 版式按规范 · 告警通知：
-              # 对象机器值（<code>）+ 结论裸文本 + <pre> 原始输出 + 收尾区
-              msg=""
-              tg_add_title msg "🚨 Dropbox 挂载失败"
-              tg_add_path msg "主机" "$(hostname)"
-              tg_add_path msg "Run ID" "${GITHUB_RUN_ID:-未知}"
-              tg_add_kv msg "结论" "挂载点未就绪，本轮无法恢复持久化状态"
-              _mount_tail="$(tg_tail_file_safe /opt/logs/rclone-dropbox.log 1200)"
-              if [ -n "$_mount_tail" ]; then
-                tg_add_section msg "🧾 原始输出"
-                tg_add_pre msg "$_mount_tail"
-              fi
-              tg_add_footer msg
-              send_tg "$msg" alert || true
+            # 系统级故障必须主动告知（1033 事故教训：挂了 3 小时无人知）。
+            # 不做凭据预检：alert 档凭据缺失时由发送层报错留痕，提前 if 掉会把告警静默吞掉
+            # （规范 · 接线）。
+            source "$GITHUB_WORKSPACE/.github/scripts/telegram/tg_notify.sh"
+            # 版式按规范 · 告警通知：
+            # 对象机器值（<code>）+ 结论裸文本 + <pre> 原始输出 + 收尾区
+            msg=""
+            tg_add_title msg "🚨 Dropbox 挂载失败"
+            tg_add_path msg "主机" "$(hostname)"
+            tg_add_path msg "Run ID" "${GITHUB_RUN_ID:-未知}"
+            tg_add_kv msg "结论" "挂载点未就绪，本轮无法恢复持久化状态"
+            _mount_tail="$(tg_tail_file_safe /opt/logs/rclone-dropbox.log 1200)"
+            if [ -n "$_mount_tail" ]; then
+              tg_add_section msg "🧾 原始输出"
+              tg_add_pre msg "$_mount_tail"
             fi
+            tg_add_footer msg
+            send_tg "$msg" alert || true
             exit 1
           fi
       - name: Prefetch cold artifacts (后台并行)
@@ -5513,7 +5513,7 @@ jobs:
           fi
 
           # 逐条读结果并计数；条目边读边构建。明细是固定几项的结构性清单（最多 5 项），
-          # 全量展示不折叠（规范 · 折叠规则）——折掉任何一项都会让读者误判归档是否完整。
+          # 全量展示不折叠（规范 · 折叠行）——折掉任何一项都会让读者误判归档是否完整。
           ok_n=0; fail_n=0; skip_n=0; total_bytes=0
           entries=""
           # read 的退出码兜底（|| [ -n "$_obj" ]）：末行缺尾换行时 read 返回非 0 但变量已赋值，

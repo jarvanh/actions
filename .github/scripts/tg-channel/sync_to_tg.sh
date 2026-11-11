@@ -690,7 +690,7 @@ _render_named_entries() {
     tg_add_entry _out "$_name" "$_meta"
   done <<< "$_in"
   [ -z "$_out" ] && return 0
-  # 超 8 条折叠（规范 · 折叠规则）：条目已由 tg_add_entry 构建（已转义且含 <code>），
+  # 超 8 条折叠（规范 · 折叠行）：条目已由 tg_add_entry 构建（已转义且含 <code>），
   # 走 tree_fold 而非 tree_code_fold（后者会二次转义）
   tree_fold "${_out%$'\n'}"
 }
@@ -711,7 +711,7 @@ _render_skipped_groups() {
     [ -n "$_out" ] && _out+=$'\n'
     _out+="$(escape_html "$_g") · ${_total}"$'\n'
     # 条目统一走真源 tg_add_entry → 已构建条目流（已转义且含 <code>），
-    # 超 max 条折叠交给 tree_fold（规范 · 折叠规则）：它只截断 + 加折叠行，不再转义。
+    # 超 max 条折叠交给 tree_fold（规范 · 折叠行）：它只截断 + 加折叠行，不再转义。
     # 此前这里手写 head -n "$_max" + 拼折叠行，是 tree_fold 的重复实现。
     local _entries=""
     while IFS= read -r _p; do

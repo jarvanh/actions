@@ -31,7 +31,9 @@ fi
 pip3 install telethon
 
 # 1. 删除 Telegram 频道所有消息
-python3 "${GITHUB_WORKSPACE}/.github/scripts/tg-channel/clean_tg_channel.py" "$CHANNEL_ID"
+# 退出码必须接住：set +e 下失败会继续往下走，不记 rc 就会把「没清掉」报成「清理完成」
+CLEAN_RC=0
+python3 "${GITHUB_WORKSPACE}/.github/scripts/tg-channel/clean_tg_channel.py" "$CHANNEL_ID" || CLEAN_RC=$?
 
 # 2. 删除 uploaded_videos.json，下次运行会重新处理所有视频
 rclone delete "$SOURCE_REMOTE/uploaded_videos.json" 2>/dev/null || true
@@ -45,10 +47,19 @@ echo "已删除 failed_videos.json（损坏标记一并清除，下次运行重�
 # 4. 发送通知（统一 HTML 排版 + 统一收尾区）
 source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 msg=""
-tg_add_title msg "🧹 ${WORKFLOW_LABEL} 频道清理完成"
+# 标题随结论降级（规范 · 结果通知）：清空失败不能还报「完成」
+if [ "$CLEAN_RC" -eq 0 ]; then
+  tg_add_title msg "🧹 ${WORKFLOW_LABEL} 频道清理完成"
+else
+  tg_add_title msg "⚠️ ${WORKFLOW_LABEL} 频道清理未完成"
+fi
 # 条目行走 tg_add_entry_text / tg_add_entry_codes（此前是整块裸文本：无分节、无树形）
 _cl=""
-tg_add_entry_text _cl "📁 已清空 Telegram 频道所有视频"
+if [ "$CLEAN_RC" -eq 0 ]; then
+  tg_add_entry_text _cl "📁 已清空 Telegram 频道所有视频"
+else
+  tg_add_entry_text _cl "📁 频道消息未全部清除（退出码 ${CLEAN_RC}，见运行日志）"
+fi
 tg_add_entry_codes _cl "uploaded_videos.json" "" "已删除 · 下次运行重新处理全部视频"
 tg_add_entry_codes _cl "failed_videos.json" "" "已删除 · 损坏标记清除，下次运行重新尝试"
 # 计数随条目流走，不写死（规范 · 分节：分节后的 ` · N` 是条目数，加动作时不会悄悄失配）
@@ -56,3 +67,5 @@ tg_add_section msg "🧹 清理动作 · $(printf '%s' "$_cl" | grep -c .)"
 tg_add_block msg "$(tree_lines "${_cl%$'\n'}")"
 tg_add_footer msg
 send_tg "$msg"
+# 清空失败要让 step 变红（通知已发，结论不吞）；成功则正常退出
+exit "$CLEAN_RC"

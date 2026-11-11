@@ -63,7 +63,7 @@ rg -n 'Notify: iCloud 下载结果|def build_telegram_lines|^flush_task_preview'
 source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
 # 收集文件名与大小，用于通知（树形条目统一 ├─/└─；元数据 " · …"，禁括号）。
-# 每组上限 8 条 + 折叠行"还有 N 条…"并入条目流（规范 · 折叠规则：残留可能上百条，
+# 每组上限 8 条 + 折叠行"还有 N 条…"并入条目流（规范 · 折叠行：残留可能上百条，
 # 全量穷举会刷屏并顶到分片边界把收尾区切走；末条 └─ 由 tree_lines 统一决定）
 FILE_DETAILS=""
 for f in "${FRAG_FILES[@]}"; do

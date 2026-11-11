@@ -481,7 +481,7 @@ _progress_render() {
     tg_add_section msg "$_running_title"
     tg_add_block msg "$(_progress_render_task_list "$running_lines")"
     # 「未执行完」是说明而不是计数的一部分（规范 · 分节：分节标题 = emoji 分节 · N），
-    # 故下沉为说明段——与 规范 · 折叠规则「缺失的目录 · 可能被删除 · N」的收敛方式同款
+    # 故下沉为说明段——与 规范 · 折叠行「缺失的目录 · 可能被删除 · N」的收敛方式同款
     [ "$finalized" -eq 1 ] && tg_add_note msg "run 已结束，以上任务本轮未执行完"
 
     if [ "$finalized" -ne 1 ]; then

@@ -118,7 +118,8 @@ fi
 if [ -s "$TMP/qingyan.out" ]; then
   _nf=$(awk -F'\t' 'NR==1{print NF}' "$TMP/qingyan.out")
   check "TSV 3 列（实际 $_nf）" $([ "$_nf" = "3" ] && echo 0 || echo 1)
-  if awk -F'\t' 'NR==1 && ($1 !~ /^[0-9]+\.[0-9]+$/ || $3 !~ /^[0-9]+\.[0-9]+$/){exit 1}' "$TMP/qingyan.out"; then
+  # 两位小数固定精度（%.2f）：一位或三位小数都判红（恒真断言会让口径漂移无感）
+  if awk -F'\t' 'NR==1 && ($1 !~ /^[0-9]+\.[0-9][0-9]$/ || $3 !~ /^[0-9]+\.[0-9][0-9]$/){exit 1}' "$TMP/qingyan.out"; then
     check "金额列为 %.2f 数值（净过期/该批净剩）" 0
   else
     check "金额列为 %.2f 数值（净过期/该批净剩）" 1

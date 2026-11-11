@@ -37,17 +37,17 @@ fi
 source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 
 # 收集文件名与大小，用于通知（树形条目统一 ├─/└─；元数据 " · …"，禁括号）。
-# 每组上限 8 条 + 折叠行"还有 N 条…"并入条目流（规范 · 折叠规则：残留可能上百条，
+# 每组上限 8 条 + 折叠行"还有 N 条…"并入条目流（规范 · 折叠行：残留可能上百条，
 # 全量穷举会刷屏并顶到 4000 分片边界把收尾区切走；末条 └─ 由 tree_lines 统一决定）
 FILE_DETAILS=""
 for f in "${FRAG_FILES[@]}"; do
   fname=$(basename "$f")
-  # 大小口径统一走真源助手（规范 · 大小写法）：du -h 的「8.0M」与全库不同口径
+  # 大小口径统一走真源助手（规范 · 大小）：du -h 的「8.0M」与全库不同口径
   fsize=$(format_bytes "$(stat -c%s "$f")")
   # 条目行统一走 tg_add_entry（主体等宽 + 元数据 " · " 分隔、统一转义）
   tg_add_entry FILE_DETAILS "$fname" "$fsize"
 done
-# 超 8 条折叠交给真源 tree_fold（规范 · 折叠规则）：条目流已由 tg_add_entry 构建（已转义、
+# 超 8 条折叠交给真源 tree_fold（规范 · 折叠行）：条目流已由 tg_add_entry 构建（已转义、
 # 已含 <code>），tree_fold 只截断 + 加折叠行；此前此处手写计数器截断 + 拼折叠行，
 # 是 tree_fold 的重复实现（与 file_split / sync_marker / sync_to_tg 收敛后不一致）
 

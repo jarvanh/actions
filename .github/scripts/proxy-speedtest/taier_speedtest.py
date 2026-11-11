@@ -874,13 +874,13 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     if failed:
         lines.append(f'❌ 失败 · {len(failed)}')
         _failed_entries = []
-        # 折叠上限取全库默认 8（规范 · 折叠规则；此前本域用 5，与 tree_fold 默认值不一致）
+        # 折叠上限取全库默认 8（规范 · 折叠行；此前本域用 5，与 tree_fold 默认值不一致）
         for r in failed[:8]:
             # 并列双机器值（节点名 · 原始异常串）走 tg_entry_codes（规范 · 条目与树形）
             _failed_entries.append(
                 tg_entry_codes(r.get('name', ''), (r.get('error') or '-')[:80]))
         if len(failed) > 8:
-            # 折叠行并入条目流，末条 └─ 由下面的循环统一决定（禁双 └─；规范 · 折叠规则）
+            # 折叠行并入条目流，末条 └─ 由下面的循环统一决定（禁双 └─；规范 · 折叠行）
             _failed_entries.append(f'还有 {len(failed) - 8} 条…')
         for _i, _l in enumerate(_failed_entries, 1):
             _c = '└─' if _i == len(_failed_entries) else '├─'

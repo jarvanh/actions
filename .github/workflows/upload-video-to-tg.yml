@@ -57,6 +57,8 @@ jobs:
 
       # ============ 步骤1：按哈希检测并去重重复视频 ============
       - name: check duplicate videos by hash and dedupe
+        # 去重是附加能力：失败不级联跳过上传，通知脚本内部按「发现重复组才发」处理
+        continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

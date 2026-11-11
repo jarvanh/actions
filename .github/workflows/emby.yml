@@ -392,38 +392,10 @@ jobs:
             # 密码明文只进 TG 私信，绝不写公开日志。
             # 凭据消息与其他通知同构：tg_add_* 构建（密码走 tg_add_path 自动转义）+ send_tg
             # （429 按 retry_after 等待重试；HTML 解析失败不重发、直接报错——与全库同一套语义）。
-            export TELEGRAM_BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}"
-            export TELEGRAM_CHAT_ID="${{ secrets.TELEGRAM_CHAT_ID }}"
-            # 重要档凭据（OpenList 凭据通知 tier=alert 直达 @SaberFuckBot，无回落）
-            export TELEGRAM_BOT_TOKEN_ALERT="${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}"
-            export TELEGRAM_CHAT_ID_ALERT="${{ secrets.TELEGRAM_CHAT_ID_ALERT }}"
+            # 凭据变更通知已拆成独立 step（always()）——本步中途失败也不会丢凭据。
+            # 这里只交代结论，/tmp/openlist-pw-note 留给下一步消费。
             if [ -s /tmp/openlist-pw-note ]; then
-              PW_KIND=$(cut -d: -f1 /tmp/openlist-pw-note)
-              PW_VAL=$(cut -d: -f2- /tmp/openlist-pw-note)
-              case "$PW_KIND" in
-                random) PW_DESC="OPENLIST_ADMIN_PASSWORD 未配置 · 异常兜底 · 本轮已随机生成";;
-                reset)  PW_DESC="库内密码与 secret 不一致 · 已纠正回 secret 值";;
-                *)      PW_DESC="已变更";;
-              esac
-              # secret 是唯一长期真相源：本条密码仅本轮有效（oe 后台人工改密在 token
-              # 吊销后无法回传持久化，随 run 结束消失）
-              PW_MSG=""
-              tg_add_title PW_MSG "🔐 OpenList 凭据"
-              tg_add_kv PW_MSG "场景" "⚠️ $PW_DESC · 本条仅本轮有效"
-              tg_add_path PW_MSG "用户名" "admin"
-              tg_add_path PW_MSG "密码" "$PW_VAL"
-              # 入口是**链接** → <a>（规范 · 取值行口径）：套 <code> 会让它不可点击，只能手抄域名。
-              # tg_add_kv 会转义整值、把标签变成 &lt;a&gt;，故这里用 tg_append 自行转义
-              tg_append PW_MSG "入口：🔗 <a href=\"$(escape_html "https://oe.${{ secrets.VD }}.eu.org")\">OpenList 后台</a>"$'\n'
-              tg_add_note PW_MSG "长期有效密码 = OPENLIST_ADMIN_PASSWORD · 下轮自动恢复为它 · 本条不会出现在公开日志"
-              # 统一收尾区（规范 · 收尾区）：凭据消息没有特殊通道，照常 tg_add_* 构建 + 收尾 + send_tg。
-              # TG_RUN_URL 由本 step env 注入；时长走 /proc/1 兜底（平台无运行起始时间上下文，
-              # 本 step 靠 job 头部，误差秒级）。两者皆无时整行自动跳过。
-              tg_add_footer PW_MSG
-              send_tg "$PW_MSG" alert \
-                && echo "已通过 TG 私信发送 OpenList 凭据（不落公开日志）" \
-                || echo "::warning::OpenList 凭据 TG 通知发送失败（不影响链路）"
-              shred -u /tmp/openlist-pw-note 2>/dev/null || rm -f /tmp/openlist-pw-note
+              echo "检测到本轮改密，凭据通知交由下一步（Notify: OpenList 凭据）发送"
             else
               # 直接用 OPENLIST_ADMIN_PASSWORD 登录成功 = 库内密码本就对齐，
               # 未发生任何改密动作 → 按约定不打扰，不发送通知。
@@ -468,6 +440,46 @@ jobs:
             fi
           }
           main || echo "::warning::install openlist failed, 302 链路将回退 direct"
+      - name: "Notify: OpenList 凭据（改密时）"
+        # 独立成步 + always()：install openlist 主体中途失败时改密动作可能已完成，
+        # 凭据不能因后续步骤中断而丢（规范 · 接线）。只有真写过 pw-note 才发。
+        if: ${{ always() && env.PLAYBACK_MODE_INPUT != 'direct' }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
+          TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          VD: ${{ secrets.VD }}
+        run: |
+          set -uo pipefail
+          [ -s /tmp/openlist-pw-note ] || { echo "本轮未改密，不发送凭据通知"; exit 0; }
+          # 真源只在 step 顶层 source 一次（规范 · 通知函数的正确接法）
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+          PW_KIND=$(cut -d: -f1 /tmp/openlist-pw-note)
+          PW_VAL=$(cut -d: -f2- /tmp/openlist-pw-note)
+          case "$PW_KIND" in
+            random) PW_DESC="OPENLIST_ADMIN_PASSWORD 未配置 · 异常兜底 · 本轮已随机生成";;
+            reset)  PW_DESC="库内密码与 secret 不一致 · 已纠正回 secret 值";;
+            *)      PW_DESC="已变更";;
+          esac
+          # secret 是唯一长期真相源：本条密码仅本轮有效（oe 后台人工改密在 token
+          # 吊销后无法回传持久化，随 run 结束消失）
+          PW_MSG=""
+          tg_add_title PW_MSG "🔐 OpenList 凭据"
+          tg_add_kv PW_MSG "场景" "⚠️ $PW_DESC · 本条仅本轮有效"
+          tg_add_path PW_MSG "用户名" "admin"
+          tg_add_path PW_MSG "密码" "$PW_VAL"
+          # 入口是**链接** → <a>（规范 · 取值行口径）：套 <code> 会让它不可点击，只能手抄域名。
+          # tg_add_kv 会转义整值、把标签变成 &lt;a&gt;，故这里用 tg_append 自行转义
+          tg_append PW_MSG "入口：🔗 <a href=\"$(escape_html "https://oe.${VD}.eu.org")\">OpenList 后台</a>"$'\n'
+          tg_add_note PW_MSG "长期有效密码 = OPENLIST_ADMIN_PASSWORD · 下轮自动恢复为它 · 本条不会出现在公开日志"
+          tg_add_footer PW_MSG
+          send_tg "$PW_MSG" alert \
+            && echo "已通过 TG 私信发送 OpenList 凭据（不落公开日志）" \
+            || echo "::warning::OpenList 凭据 TG 通知发送失败（不影响链路）"
+          shred -u /tmp/openlist-pw-note 2>/dev/null || rm -f /tmp/openlist-pw-note
+
       - name: probe onedrive shortcuts
         continue-on-error: true
         run: |

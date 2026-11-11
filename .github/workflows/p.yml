@@ -115,20 +115,33 @@ jobs:
           VW_DIR=/dropbox/self-hosted/bitwarden
           sudo mkdir -p "$VW_DIR"
           sudo chown -R runner:runner /dropbox
-          rclone copy "dropbox:self-hosted/bitwarden" "$VW_DIR" -P --retries 5 --retries-sleep 10s --low-level-retries 20
-          if [ ! -s "$VW_DIR/bitwarden-data/db.sqlite3" ]; then
-            echo "::error::远端 dropbox:self-hosted/bitwarden/bitwarden-data 未找到 db.sqlite3，数据拉取异常，终止运行（不启动空库、不回传）"
-            # P0 加固（2026-10-11 事故）：这类终止以前只有日志没人看，接力每 2 分钟
-            # 空转一轮直到人工撞见——数据异常必须炸响。告警失败不改变终止语义。
+
+          # 数据异常告警：拉取失败与空库是两个独立故障，都要炸响。这类终止以前只有
+          # 日志没人看，接力每 2 分钟空转一轮直到人工撞见。告警失败不改变终止语义。
+          notify_restore_failed() {
+            local reason="$1"
             if source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh" 2>/dev/null; then
               msg=""
               tg_add_title msg "🚨 vaultwarden 数据恢复失败"
-              tg_add_kv msg "现象" "dropbox:self-hosted/bitwarden/bitwarden-data 缺 db.sqlite3"
+              tg_add_kv msg "现象" "$reason"
               tg_add_kv msg "处置" "本轮终止：不启动空库、不回传（防覆盖远端）"
               tg_add_note msg "OneDrive backup/bitwarden_latest.tar.gz 可作恢复素材；修复远端后手动 dispatch"
               tg_add_footer msg
               send_tg "$msg" alert || true
             fi
+          }
+
+          # rclone 失败时 set -e 会直接退出，走不到后面的空库检查——必须先接住，
+          # 否则「拉取失败」这条最需要告警的路径反而静默（规范 · 接线）。
+          if ! rclone copy "dropbox:self-hosted/bitwarden" "$VW_DIR" -P --retries 5 --retries-sleep 10s --low-level-retries 20; then
+            echo "::error::dropbox:self-hosted/bitwarden 拉取失败（rclone 非零退出），终止运行"
+            notify_restore_failed "dropbox:self-hosted/bitwarden 拉取失败（rclone 非零退出）"
+            exit 1
+          fi
+
+          if [ ! -s "$VW_DIR/bitwarden-data/db.sqlite3" ]; then
+            echo "::error::远端 dropbox:self-hosted/bitwarden/bitwarden-data 未找到 db.sqlite3，数据拉取异常，终止运行（不启动空库、不回传）"
+            notify_restore_failed "dropbox:self-hosted/bitwarden/bitwarden-data 缺 db.sqlite3"
             exit 1
           fi
           touch /tmp/VW_DATA_PULLED

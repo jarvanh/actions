@@ -47,6 +47,8 @@ jobs:
       run: Start-Process -FilePath ".\ngrok\ngrok.exe" -ArgumentList "tcp 3389 --region in --log stdout --log-format term --log ngrok.log" -WindowStyle Hidden
 
     - name: Send RDP info to Telegram
+      # 隧道步骤失败也要把已拿到的 RDP 入口发出去；缺 always() 时入口信息会整段静默。
+      if: ${{ always() }}
       env:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

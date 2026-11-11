@@ -435,6 +435,9 @@ jobs:
       #   否则每小时 cron + 自续接力会把同一个失效账号刷成一整页。
       # 本条 step 自身恒不失败（fire-and-forget），不阻断同步。
       - name: 存储账号失效巡检（Telegram 告警）
+        # 前置步骤失败（容器校验 exit 1 等）时告警同样要发：本步恒不失败，
+        # 缺 always() 会让「存储账号失效」在整轮最需要它的时候静默跳过。
+        if: ${{ always() }}
         run: |
           source "$GITHUB_WORKSPACE/.github/scripts/openlist/load_all.sh"
           # 恒不失败: 告警是附加能力，不能因为它让整轮同步 exit 1

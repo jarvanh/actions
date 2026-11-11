@@ -246,7 +246,7 @@ _restore_one_entry() {
   return 0
 }
 
-# 条目列表渲染: 每组上限 8 条，超出折叠"还有 N 条…"（规范 · 折叠规则，
+# 条目列表渲染: 每组上限 8 条，超出折叠"还有 N 条…"（规范 · 折叠行，
 # 防超长列表刷屏并顶到 4000 字符分片边界把收尾区切走）。
 # 统一树形（2026-09-09 收敛：条目统一 ├─/└─，不再用 "• " 平铺；折叠行并入条目流，
 # 末条 └─ 由 tree_lines 统一决定，禁双 └─）
@@ -381,7 +381,8 @@ restore_fixed_files() {
     tg_add_note msg "目标端副本与源端都不存在，条目已保留未出账，需人工确认"
   fi
   if [ -n "$skip_list" ]; then
-    tg_add_section msg "⏸ 跳过待确认 · ${total_skip}"
+    # 跳过类统一用 ⏭️（规范 · 状态图标语义）；⏸️ 专用于同步面板「轮次收摊」终态
+    tg_add_section msg "⏭️ 跳过待确认 · ${total_skip}"
     tg_add_block msg "$(_fold_list "$skip_list" "$total_skip")"
     tg_add_note msg "原路径已有同名文件但大小不符，未覆盖，条目保留"
   fi

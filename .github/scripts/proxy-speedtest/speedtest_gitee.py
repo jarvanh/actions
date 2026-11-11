@@ -1850,7 +1850,7 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
     _failed = [r for r in speed_results if not r.get('ok')]
     if _failed:
         summary_lines.append(f'❌ 失败 · {len(_failed)}')
-        # 折叠上限取全库默认 8（规范 · 折叠规则；此前本域用 5，与 tree_fold 默认值不一致）
+        # 折叠上限取全库默认 8（规范 · 折叠行；此前本域用 5，与 tree_fold 默认值不一致）
         _fe = [tg_entry_codes(r.get('name', ''), (r.get('error') or r.get('reason') or '-')[:80])
                for r in _failed[:8]]
         if len(_failed) > 8:

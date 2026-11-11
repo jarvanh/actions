@@ -1305,7 +1305,7 @@ def build_telegram_lines(results, *, meta, gist_res, bundle=None,
     _failed = [r for r in results if not r.get('ok')]
     if _failed:
         lines.append(f'❌ 失败 · {len(_failed)}')
-        # 折叠上限取全库默认 8（规范 · 折叠规则；此前本域用 5，与 tree_fold 默认值不一致）
+        # 折叠上限取全库默认 8（规范 · 折叠行；此前本域用 5，与 tree_fold 默认值不一致）
         _fe = [tg_entry_codes(r.get('name', ''), (r.get('error') or r.get('reason') or '-')[:80])
                for r in _failed[:8]]
         if len(_failed) > 8:
