@@ -192,6 +192,12 @@ jobs:
           # 记录 job 近似起点：Keep alive 的动态死线以它为基准（Set up job/Node/checkout
           # 与本步间隔仅数秒，误差可忽略；2026-10-01 动态保活改造）
           date +%s > /tmp/job-start-epoch 2>/dev/null || true
+          # 2026-11-11：死线真源与起点同刻落盘。原先只在 Keep alive 步骤写
+          # /tmp/openclaw-deadline.env（本轮实测 20:08:53 才出现），而 job 起点是
+          # 19:58:23 —— 中间 10 分钟看板读不到真源、回退到旧的 332 分钟，
+          # 显示 01:30:23 而实际死线是 01:24:23（差 6 分钟）。
+          # 公式唯一实现在 handoff/deadline.sh，起点与死线同刻落盘。
+          bash "$GITHUB_WORKSPACE/.github/scripts/handoff/deadline.sh" >/dev/null 2>&1 || true
           # 安装 rclone：GitHub Releases 直下 .deb，失败回退 rclone.org 安装脚本
           bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
       - name: rclone-config
@@ -4360,16 +4366,10 @@ jobs:
           # 上限 15min（cutover.sh），与归档 ~8min + 通知接力 2m 相加的最坏账必须
           # 仍落在硬上限内（326 + 收尾 timeout 30 + 2 = 358 < 360）。交接成功时
           # 实际只用 ~8min（归档已移出关键路径），预算给的是 handoff 失败回退的坏账。
-          HARD_LIMIT_MINUTES=360
-          FINAL_ARCHIVE_BUDGET_MINUTES=26
-          SAFETY_MARGIN_MINUTES=8
-          DEADLINE_MINUTES=$((HARD_LIMIT_MINUTES - FINAL_ARCHIVE_BUDGET_MINUTES - SAFETY_MARGIN_MINUTES))
-          # 2026-11-11：死线公式落盘为真源 —— 看板（board.py）原先硬编码 332 分钟，
-          # 与本轮 326 相差 6 分钟，主人看到「TG 说 15 分钟 / 看板说 14 分钟」对不上。
-          # 消费者的正确姿势是读这个文件，而不是各自抄一遍公式。
-          printf 'DEADLINE_MINUTES=%s\nHARD_LIMIT_MINUTES=%s\nFINAL_ARCHIVE_BUDGET_MINUTES=%s\nSAFETY_MARGIN_MINUTES=%s\n' \
-            "$DEADLINE_MINUTES" "$HARD_LIMIT_MINUTES" "$FINAL_ARCHIVE_BUDGET_MINUTES" "$SAFETY_MARGIN_MINUTES" \
-            > /tmp/openclaw-deadline.env 2>/dev/null || true
+          # 2026-11-11：公式唯一实现在 handoff/deadline.sh（rclone-install 已先落盘一次）。
+          # 这里 eval 同一实现，避免「看板/S 告警各抄一遍公式」再次漂移
+          #（历史事故：board.py 硬编码 332 vs workflow 326，差 6 分钟）。
+          eval "$(bash "$GITHUB_WORKSPACE/.github/scripts/handoff/deadline.sh")"
           # tr -dc '0-9'：文件存在但为空/含杂字符时兜底为 0，避免算术表达式炸掉步骤
           JOB_START_EPOCH="$(cat /tmp/job-start-epoch 2>/dev/null | tr -dc '0-9' || true)"
           [ -n "${JOB_START_EPOCH}" ] || JOB_START_EPOCH=0
