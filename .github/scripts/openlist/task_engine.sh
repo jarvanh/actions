@@ -579,17 +579,25 @@ _repair_reserve_seconds() {
   [ "$r" -lt "${OPENLIST_SYNC_MIN_SLICE_SECONDS:-600}" ] && r="${OPENLIST_SYNC_MIN_SLICE_SECONDS:-600}"
   echo "$r"
 }
+# 子目录循环的"预留量"（单一来源，2026-11-11 抽出）:
+#   份额生效（并行 worker 内、且份额比全局锚点更近）→ 最小片（默认 600s）:
+#     份额内不必再为"整轮尾部"预留修复时间，尾部保护由份额本身承担。
+#   否则 → OPENLIST_REPAIR_RESERVE_PCT 比例的全局预留（长尾修复需要它）。
+# 为什么必须抽出来: 判据与**日志文案**必须同一来源 —— 此前日志固定打印
+#   `_repair_reserve_seconds`（4800s），而份额生效时判据实际用的是 600s，
+#   日志与行为不一致（run 42830717609 现场可见「尾部 4800s」却提前收摊）。
+_subdir_reserve_seconds() {
+  if _pair_share_binding; then
+    echo "${OPENLIST_SYNC_MIN_SLICE_SECONDS:-600}"
+  else
+    _repair_reserve_seconds
+  fi
+}
 _subdir_budget_stop() {
   local _dl r
   _dl=$(budget_deadline_epoch)
   [ -n "$_dl" ] || return 1
-  if _pair_share_binding; then
-    # 份额内: 尾部保护由份额本身承担，只需留够"一个最小片"给本子目录收尾；
-    #   若仍用 25% 全局修复预留（默认 4800s），20min 份额下本闸恒真 ⇒ 一个子目录都开不起来。
-    r="${OPENLIST_SYNC_MIN_SLICE_SECONDS:-600}"
-  else
-    r=$(_repair_reserve_seconds)
-  fi
+  r=$(_subdir_reserve_seconds)
   [ $(( $(date +%s) + r )) -ge "$_dl" ]
 }
 
@@ -1512,6 +1520,29 @@ _sync_task_impl() {
   local sorted_subdirs=""
   declare -A subdir_size_map=()
   declare -A subdir_status_map=()
+  # 只有一个子目录时**跳过大小枚举**（2026-11-11 加，run 42830717609 实证）:
+  #   排序的意义是"小的先完成、进度可见"；只有一个子目录时纯属浪费，而这次
+  #   "浪费"是**对一棵巨大子树做全递归列举**。现场: wopan176Crypt/task1 的
+  #   一级子目录只有 `1024j`（782.286 GiB / 约 20 万文件），为它跑 rclone size
+  #   花了 15.5 分钟（15:37:54 → 15:53:22），把 20 分钟的公平份额吃光 ⇒
+  #   一个字节没传，该对以 `failed · 0 B` 收场。两个含份额修复的轮次里各出现
+  #   7 个 0 B 对 ≈ 140 分钟/轮（占 320 分钟预算的 44%）纯列举开销。
+  #   单子目录时直接沿用已算好的源端总大小（同一棵树，无需再列一遍）。
+  local _sz_pre_count=0 _sz_pre_line
+  while IFS= read -r _sz_pre_line; do
+    [ -n "$_sz_pre_line" ] && _sz_pre_count=$((_sz_pre_count + 1))
+  done <<< "$subdirs"
+  if [ "$_sz_pre_count" -eq 1 ]; then
+    local _sz_only=""
+    while IFS= read -r _sz_pre_line; do
+      [ -n "$_sz_pre_line" ] && _sz_only="$_sz_pre_line"
+    done <<< "$subdirs"
+    local _sz_only_bytes="${source_size_bytes:-0}"
+    [[ "$_sz_only_bytes" =~ ^[0-9]+$ ]] || _sz_only_bytes=0
+    echo "只有 1 个子目录（${_sz_only}），跳过大小枚举（无排序需求；避免全递归列举吃掉整个份额）"
+    subdir_size_map["$_sz_only"]=$_sz_only_bytes
+    sorted_subdirs="${_sz_only_bytes} ${_sz_only}"$'\n'
+  else
   # 并行统计子目录大小（纯只读列举，无状态冲突；_rclone_size_json 单次
   # 1-3s，串行在 150+ 子目录的任务上要耗 5 分钟以上，8 路并行 <1 分钟）。
   # 结果按索引写临时文件回收，保持与串行完全一致的排序口径与日志输出
@@ -1554,6 +1585,7 @@ _sync_task_impl() {
     _sz_k=$((_sz_k + 1))
   done
   rm -rf "$_sz_dir"
+  fi
   subdirs=$(echo "$sorted_subdirs" | sort -n | cut -d' ' -f2-)
 
   # 预统计子目录总数（用于进度展示）
@@ -1602,7 +1634,7 @@ _sync_task_impl() {
     # 用 `_subdir_budget_stop`（预留修复尾段）而不是 `sync_budget_stop`: 见其注释 ——
     # 修复管线紧跟在每个子目录的 sync 之后，不给它留预算就等于让长尾永远不收敛。
     if _subdir_budget_stop; then
-      echo "⏳ 时间预算将尽，停止开新子目录（未同步的留给下轮接力；尾部 $(_repair_reserve_seconds)s 留给修复管线）"
+      echo "⏳ 时间预算将尽，停止开新子目录（未同步的留给下轮接力；尾部 $(_subdir_reserve_seconds)s 留给修复管线）"
       SYNC_TIME_EXHAUSTED=1
       break
     fi
@@ -1798,7 +1830,25 @@ _sync_task_impl() {
   #   放在最末尾是因为它必须**跨过**后续 sync 尝试 —— 那些调用会把 SYNC_FAILED
   #   重置为它们自己那一次的结果（见 SYNC_FAILED_BATCH 注释），只有独立标志能留下。
   #   父级循环按 SYNC_FAILED 分类子目录，所以这里必须并进去。
+    # ★ 收尾返回状态抽成函数（2026-11-11 修 + 抽出以便单测）
+  _sync_task_impl_return_status
+}
+
+# _sync_task_impl 的收尾返回状态（2026-11-11 抽函数）
+# 语义: 批次维度失败并入任务级；返回值必须与 SYNC_FAILED **一致**。
+# 为什么必须显式 return（run 42830717609/42887432510 实证）:
+#   此处原本只有一行 `[ "${SYNC_FAILED_BATCH:-0}" = "1" ] && SYNC_FAILED=1`。
+#   bash 里这个 `&&` 列表在**条件为假**时整条命令返回 1 ⇒ 函数返回值恒为 1
+#   ⇒ 调用方 sync_task 的兜底「rc≠0 ⇒ SYNC_FAILED=1」（为治批次熔断被当成功
+#   而加）把它变成"失败"。两者叠加的后果: **所有走"子目录拆分"路径的任务
+#   一律被判失败**，与事实相反 —— 现场 wopan176Crypt 的 0/1/2/3 实际传了
+#   7.371/11.178/9.226/8.257 GiB，收尾全记 `failed`，两个轮次各 15/21 判失败。
+#   走直连路径的对（gd:* 与小于阈值的 openlist 对）在函数中段就 return 了，
+#   不受影响 —— 这正好解释了"只有大对报 failed"。
+_sync_task_impl_return_status() {
   [ "${SYNC_FAILED_BATCH:-0}" = "1" ] && SYNC_FAILED=1
+  if [ "${SYNC_FAILED:-0}" = "1" ]; then return 1; fi
+  return 0
 }
 
 # sync_task: rclone sync 编排（删除语义已整体移除，目标端只增不减——依据见 rclone_flags.sh）

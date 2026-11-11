@@ -176,6 +176,49 @@ OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 5400 ))       # 剩 90min < 2h �
 if _batch_budget_stop; then ok "F8 无份额: 剩 90min → 不开新批次（原尺度不变）"; else bad "F8 无份额: 剩 90min 却开批次"; fi
 unset OPENLIST_SYNC_DEADLINE_EPOCH OPENLIST_PAIR_DEADLINE_EPOCH
 
+# ================= G. 收尾返回状态必须与标志一致（2026-11-11 修）=================
+# 现场（run 42830717609/42887432510）: wopan176Crypt 的 0/1/2/3 实际传了
+#   7.371/11.178/9.226/8.257 GiB，收尾却全记 `failed`，两个轮次各 15/21 判失败。
+#   根因: _sync_task_impl 末尾原本只有 `[ cond ] && SYNC_FAILED=1`，条件为假时
+#   整条命令返回 1 ⇒ 函数返回值恒为 1 ⇒ 调用方兜底「rc≠0 ⇒ SYNC_FAILED=1」
+#   把成功判成失败。走直连路径的对在中段就 return 了，所以只有大对受害。
+SYNC_FAILED=0 SYNC_FAILED_BATCH=0 SYNC_TIME_EXHAUSTED=0
+_sync_task_impl_return_status; _rc=$?
+[ "$_rc" = "0" ] && ok "G1 全绿 → rc=0（不再把拆分路径的成功判成失败）" || bad "G1 rc=$_rc（应为0）"
+SYNC_FAILED=1
+_sync_task_impl_return_status; _rc=$?
+[ "$_rc" = "1" ] && ok "G2 真失败 → rc=1（调用方兜底不会误改）" || bad "G2 rc=$_rc（应为1）"
+SYNC_FAILED=0 SYNC_FAILED_BATCH=1
+_sync_task_impl_return_status; _rc=$?
+[ "$_rc" = "1" ] && [ "$SYNC_FAILED" = "1" ] \
+  && ok "G3 批次失败 → 并入 SYNC_FAILED 且 rc=1" \
+  || bad "G3 rc=$_rc SYNC_FAILED=$SYNC_FAILED"
+SYNC_FAILED=0 SYNC_FAILED_BATCH=0 SYNC_TIME_EXHAUSTED=1
+_sync_task_impl_return_status; _rc=$?
+[ "$_rc" = "0" ] && ok "G4 份额/预算到点交棒（无失败）→ rc=0，状态仍能如实记为 truncated" \
+  || bad "G4 rc=$_rc（应为0，否则交棒会被兜底改成 failed）"
+SYNC_FAILED=0 SYNC_FAILED_BATCH=0 SYNC_TIME_EXHAUSTED=0
+
+# ================= H. 子目录闸的预留量必须与日志同源（2026-11-11 修）=================
+# 现场: 份额生效时判据用 600s，日志却固定打印 4800s ⇒ 日志与行为不一致。
+OPENLIST_REPAIR_RESERVE_PCT=25
+OPENLIST_SYNC_BUDGET_SECONDS=19200
+OPENLIST_SYNC_MIN_SLICE_SECONDS=600
+unset OPENLIST_PAIR_DEADLINE_EPOCH OPENLIST_SYNC_DEADLINE_EPOCH
+[ "$(_subdir_reserve_seconds)" = "4800" ] \
+  && ok "H1 无份额 → 用 25% 全局修复预留（4800s，原行为不变）" \
+  || bad "H1 实得 $(_subdir_reserve_seconds)"
+OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 19000 ))
+OPENLIST_PAIR_DEADLINE_EPOCH=$(( $(date +%s) + 1200 ))
+[ "$(_subdir_reserve_seconds)" = "600" ] \
+  && ok "H2 份额生效 → 预留退到最小片 600s（20min 份额下才开得动子目录）" \
+  || bad "H2 实得 $(_subdir_reserve_seconds)"
+OPENLIST_PAIR_DEADLINE_EPOCH=$(( OPENLIST_SYNC_DEADLINE_EPOCH + 5000 ))
+[ "$(_subdir_reserve_seconds)" = "4800" ] \
+  && ok "H3 份额比全局更远 → 仍用全局修复预留（份额不放大约束）" \
+  || bad "H3 实得 $(_subdir_reserve_seconds)"
+unset OPENLIST_PAIR_DEADLINE_EPOCH OPENLIST_SYNC_DEADLINE_EPOCH
+
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
