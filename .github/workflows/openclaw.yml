@@ -3347,6 +3347,12 @@ jobs:
             echo "omniroute_volume_snapshot_failed volume=$VOLUME after 4 attempts"
             exit 4
           fi
+
+          # 2026-11-11：归档完就删掉 VACUUM INTO 的中间文件 —— 它和活库一样大（~2GB），
+          # 留在卷里会让卷体积翻倍，交接时裸 dump / 上传都白搬一倍（实测 4.19GB vs 2.2GB）。
+          # 容器此时可能已停，故用挂载方式删，不走 docker exec。
+          docker run --rm --user root -v "$VOLUME:/data" "$IMAGE" \
+            sh -c 'rm -f /data/storage-backup.sqlite' >/dev/null 2>&1 || true
           data_size=$(stat -c%s "$STAGE_DIR/data.tar.gz" 2>/dev/null || echo 0)
           if [ "$data_size" -lt "$MIN_SIZE" ]; then
             echo "omniroute_data_snapshot_too_small size=${data_size} min=${MIN_SIZE}"

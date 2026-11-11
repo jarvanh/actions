@@ -81,8 +81,11 @@ mkdir -p "$PAYLOAD"
 _omni_vol="${OMNIROUTE_VOLUME:-omniroute_omniroute-data}"
 _omni_img="${OMNIROUTE_IMAGE:-diegosouzapw/omniroute:latest}"
 rm -f "$PAYLOAD/omnivol.tar" "$PAYLOAD/omnideploy.tar" "$PAYLOAD/dump.rc"
+# 排除 storage-backup.sqlite：那是归档脚本 VACUUM INTO 的中间产物（~2GB），
+# 活库 storage.sqlite 才是真数据（容器已停 → 它是静树且已 checkpoint）。
+# 不排除的话每轮要多搬 2GB（实测卷 4.19GB，其中 1.98GB 是它）。
 if docker run --rm --user root -v "${_omni_vol}:/data:ro" "$_omni_img" \
-     sh -c 'nice -n 19 ionice -c3 tar cf - -C /data .' > "$PAYLOAD/omnivol.tar" 2>/tmp/omnivol-dump.err \
+     sh -c 'nice -n 19 ionice -c3 tar cf - -C /data --exclude=./storage-backup.sqlite .' > "$PAYLOAD/omnivol.tar" 2>/tmp/omnivol-dump.err \
    && [ -s "$PAYLOAD/omnivol.tar" ]; then
   echo "⚡ [ai-archives] OmniRoute 卷裸 dump 完成（$(du -h "$PAYLOAD/omnivol.tar" | awk '{print $1}')，$(date '+%T')）"
 else
