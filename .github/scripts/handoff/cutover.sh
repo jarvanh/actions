@@ -109,14 +109,20 @@ systemctl --user stop openclaw-health.timer gateway-watchdog.timer \
   zcode2api-proxy-watchdog.timer 2>/dev/null || true
 echo "✅ [cutover] 本机自愈看门狗已暂停（防交接期间拉回隧道/服务）"
 
-# ── 2b. 停本机隧道（**只停聊天入口 oc**）──
-# qb（额度看板 Mini App）刻意不停：看板是只读 UI，秒级可替换，但公网入口一旦断了
-# 就要等继任者把看板跑起来（在 AI 闸门之后，约 1-3 分钟）—— 主人实测到的「看板掉线」
-# 就是这段空窗。留旧 VM 的 qb connector 到 job 结束（VM 销毁即自然下线），
-# 继任者随后起自己的 connector；两个 connector 并存期间 Cloudflare 随机分流，
-# 旧看板在上游停掉后只会显示降级数据，不会 404/断连。
-sudo systemctl stop cftun-oc.service 2>/dev/null || true
-echo "✅ [cutover] 聊天隧道已停；看板隧道 qb 保留（避免 Mini App 断连）"
+# ── 2b. 停**全部**服务与入口（2026-11-11 主人定调）──
+# 原则：切换空窗期不留半活状态。只要旧实例还在跑，就存在「继任者已按 T0 快照恢复、
+# 旧实例继续写盘 → 这些写入随 VM 销毁永久丢失」的窗口。所以交出即全停，
+# 由继任者确认切换成功后统一拉起（与其零丢失口径完全一致）。
+#
+# 顺序：先停服务（让它落盘干净），再停入口（避免入口指向已停服务）。
+for _s in workbuddy zcode2api qingyan autoclaw quota-board; do
+  bash "$GITHUB_WORKSPACE/.github/scripts/services/services.sh" stop "$_s" >/dev/null 2>&1 || true
+done
+for _c in omniroute rss-to-telegram trae2api qoder2api; do
+  docker stop "$_c" >/dev/null 2>&1 || true
+done
+sudo systemctl stop cftun-oc.service cftun-qb.service cftun-ai-api.service 2>/dev/null || true
+echo "✅ [cutover] 全部服务与入口已停（切换空窗期不留半活实例）"
 
 # ── 3. rsync 只读 daemon（绑 tailscale IP；模块 oc/zc 映射状态树，ai 放 AI 整包）──
 mkdir -p /tmp/handoff-ai-payload

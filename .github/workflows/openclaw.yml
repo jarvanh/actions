@@ -2236,19 +2236,9 @@ jobs:
               else
                 echo "✅ [quota] 15s 稳定存活且 8321 在听"
                 # 2026-11-11：看板隧道在此启动（晚于看板就绪，避免 tunnels.sh 的
-                # 60s 端口等待落空）。交接轮还要**等旧轮 job 结束**再起 ——
-                # 旧 VM 的 qb connector 保留到销毁，两个 connector 并存会让 Cloudflare
-                # 随机分流到即将下线的旧看板；按主人要求「旧看板停了才切新的」，
-                # 这里以「旧 run completed」为切换点（gh api，≤10min 兜底）。
-                if [ -n "${HANDOFF_OF:-}" ] && [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
-                  _w=0
-                  while [ "$_w" -lt 600 ]; do
-                    _st="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${HANDOFF_OF}" --jq '.status' 2>/dev/null || echo unknown)"
-                    [ "$_st" = "completed" ] && break
-                    sleep 10; _w=$((_w + 10))
-                  done
-                  echo "⏱️ [quota] 等旧轮结束 ${_w}s（status=${_st:-unknown}）→ 起 qb 隧道"
-                fi
+                # 60s 端口等待落空 —— 那是「看板掉线」的根因之一）。
+                # 交接轮无需等旧轮：cutover 已把旧 VM 的 qb connector 一并停掉
+                #（切换空窗期不留半活实例），因此不存在两个 connector 分流。
                 [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ] \
                   && bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure qb || true
               fi
