@@ -79,21 +79,22 @@ echo "🤝 [takeover] 旧轮已交出（rsync 源 ${OLD_TS_IP}:${HANDOFF_RSYNC_P
 
 # ── 4. 增量直传（oc ∥ zc 两路并行；基座是 ≤20min 前的周期包，实际传的是 delta）──
 handoff_put "$HANDOFF_NEW_REMOTE" "$(handoff_new_json rsync_started)"
-# 2026-11-11 回滚：**不能排除 cli/rollout**。
-# 实证（rollout 文件首行）：{"request":{"body":{"messages":[{"role":"system",
-# "content":"You are ZCode..."}]}}} —— 这里存的是**每次模型请求的完整
-# messages 数组（含会话正文与助手回复）**，单个 session 可达 2.8GB（每请求重放
-# 全量历史）。此前依据归档脚本注释「会话正文在 db.sqlite、rollout 只是 model-io
-# 转储」而排除，属误判：剔除会让继任者丢失最多一个周期包（≤20 分钟）的真实会话
-# 记录。零丢失是硬约束，故恢复整目录同步。
+# 2026-11-11 二次实证（推翻上一条误判）：**排除 cli/rollout，安全**。
+# 主人反证：「zcode.tar.gz 不含 rollout 却每轮都能正确恢复」→ 会话必有另一真源。
+# 实查 cli/db/db.sqlite：session 表含本次对话 sess_7ccf5eb2（标题「优化 openclaw
+# 与 AI 网关启停时长」），该 session 有 message 997 行 / part 2890 行，
+# message.data = {"role":"assistant",…}、part.data = {"type":"tool",…}，即完整会话正文。
+# rollout 的 model-io-*.jsonl 只是每次模型请求的**输入快照**（每请求重放全量历史
+# 才涨到 2.8GB），属冗余观测转储。周期归档包剔除它仍能恢复，正因真源是 db.sqlite。
+# 结论：交接也排除，既零丢失，又省掉 6.83GB 全量重传（实测 speedup 仅 1.19）。
 _zc_rc=0
-# 2026-11-11：zc 通道开 zstd 压缩。实测 zc 侧无法走增量（周期包 --exclude 'rollout'，
-# 继任者基座里没有 rollout → 6.83GB 全量重传，speedup 仅 1.19），42MB/s 下要 162s。
-# rollout 是 JSONL，实测压缩比 2.7x；用 zstd（而非 zlib）避免 CPU 成为新瓶颈
-#（zlib 单线程压 6.8GB ≈ 136s，基本吃掉全部收益）。
+# 2026-11-11：zc 通道保留 zstd 压缩（对剩余 JSONL/日志类文件仍有增益，
+# 实测 zstd -1 压缩比 2.8x、吞吐 320MB/s，CPU 不会成为瓶颈）。排除 rollout 后
+# 传输量降一个数量级，压缩不再是关键路径，但留着无害。
 # 代价：两端都是 ubuntu-latest 的 rsync 3.4.x，协议一致；不支持时 rsync 会报错，
 # 由 timeout/失败分支兜底（交接回退传统路径，零丢失不变）。
 ( timeout 780 rsync -a --delete --timeout=60 --stats \
+    --exclude 'cli/rollout/**' \
     --compress --compress-choice=zstd --compress-level=1 \
     rsync://"${OLD_TS_IP}:${HANDOFF_RSYNC_PORT}"/zc/ "$HOME/.zcode/" 2>&1 \
   | tail -n 4; exit "${PIPESTATUS[0]}" ) > /tmp/handoff-rsync-zc.log 2>&1 & _zc_pid=$!
