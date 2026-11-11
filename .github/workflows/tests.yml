@@ -8,7 +8,7 @@
 #     （sync_trend_budget）、无 docker（truth）、沙箱拦子进程（progress_no_orphans）。
 #     ubuntu runner 上这些都不存在，基线因此更硬（本域套件全绿）。
 # 结构: 按「域」分组，每域一个 job；新增域照抄同构 job 即可（域内一律串行）。
-# 现状: 两个 job —— openlist 与 proxy-speedtest；其余域仍在其本机/自查脚本里跑。
+# 现状: 三个 job —— openlist、proxy-speedtest 与 notify（通知版式/机械校验）。
 #       新增域时：在 inputs.domain 的说明里列上它、加一个同构 job（`if` 判 domain）。
 # 触发: 只 workflow_dispatch —— 仓库既有约定是「无任何 workflow 监听 push/pull_request」
 #       （main 有并行推送，加了会产生大量冗余运行）。需要验证时手动 dispatch。
@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       domain:
-        description: "只跑指定域（留空 = 全部：openlist / proxy-speedtest）"
+        description: "只跑指定域（留空 = 全部：openlist / proxy-speedtest / notify）"
         required: false
         type: string
         default: ""
@@ -217,3 +217,25 @@ jobs:
             exit 1
           fi
           echo "✅ proxy-speedtest 回归套件全绿（$pass/$pass）"
+
+  notify:
+    # 通知域：版式渲染自检 + 审计清单 1–15 项机械校验。
+    # 无外部依赖（只用 bash/python3 + 仓库内脚本），因此不需要 setup / 凭据。
+    if: ${{ github.event.inputs.domain == '' || github.event.inputs.domain == 'notify' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: 渲染预览（版式构件自检）
+        # 转义/空行/条目粘连/子行对齐都在这里验；失败即版式构件被改坏
+        run: bash skills/telegram-notify-audit/scripts/render_preview.sh
+
+      - name: 机械校验（审计清单 1–15 项）
+        # 粗体/平铺/半角冒号/紧凑时长/curl 直发/分隔线/TG_RUN_URL/树形前缀/
+        # 分节计数/助手表/函数体内 source/收尾区覆盖/🕒/UTC；有 FAIL 退出码 1
+        run: bash skills/telegram-notify-audit/scripts/list_notify.sh --check
+
+      - name: 通知清单（打印，便于对照本次改动）
+        run: bash skills/telegram-notify-audit/scripts/list_notify.sh | tail -30

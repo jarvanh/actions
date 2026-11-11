@@ -970,6 +970,12 @@ bash skills/telegram-notify-audit/scripts/render_preview.sh
 bash skills/telegram-notify-audit/scripts/list_notify.sh --check
 ```
 
+两步都已接进 `tests.yml` 的 `notify` 域（手动 dispatch，与仓库「不监听 push」的约定一致）：
+
+```bash
+gh workflow run tests.yml -f domain=notify
+```
+
 ### 7.2 回归套件
 
 改到 openlist 域的脚本时跑回归（`.github/scripts/openlist/tests/` 下的套件）：

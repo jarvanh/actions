@@ -260,13 +260,44 @@ def strip_code(line):
     return "".join(out)
 
 
-def scopes_for(path, lines):
-    """把文件切成「独立 shell 作用域」：.sh 整文件；.yml 按 run: | 块；heredoc 单独成域。
+def shell_scopes(body):
+    """把一组带行号的文本按「函数体 / 顶层」切开（body: [(行号, 文本)]）。"""
+    out, cur, top, fn, depth = [], [], [], None, 0
+    for ln, l in body:
+        code = strip_code(l)
+        m = re.match(r"^\s*(?:function\s+)?([A-Za-z_][\w-]*)\s*\(\)\s*\{", code)
+        if fn is None and m:
+            if top:
+                out.append((top[0][0], top)); top = []
+            fn = m.group(1); cur = [(ln, l)]
+            depth = code.count("{") - code.count("}")
+            if depth <= 0:
+                out.append((cur[0][0], cur)); cur, fn, depth = [], None, 0
+            continue
+        if fn is not None:
+            cur.append((ln, l))
+            depth += code.count("{") - code.count("}")
+            if depth <= 0:
+                out.append((cur[0][0], cur)); cur, fn, depth = [], None, 0
+        else:
+            top.append((ln, l))
+    if top:
+        out.append((top[0][0], top))
+    if cur:
+        out.append((cur[0][0], cur))
+    return out
 
-    各 GitHub step 是独立 shell，跨 step 累计花括号会把后面的 source 误判成函数体内。
+
+def scopes_for(path, lines):
+    """把文件切成「独立 shell 作用域」：.sh 按函数体；.yml 先切 run: | 块与 heredoc，
+    再在块内按函数体切。
+
+    两层都必要：各 GitHub step 是独立 shell（跨 step 累计花括号会误判），
+    而 step 内的函数体又是另一个判定单元（函数体内 source / 收尾区归属）。
     """
+    numbered = [(i + 1, l) for i, l in enumerate(lines)]
     if not path.endswith((".yml", ".yaml")):
-        return [(1, [(i + 1, l) for i, l in enumerate(lines)])]
+        return shell_scopes(numbered)
 
     out = []
     i = 0
@@ -284,7 +315,8 @@ def scopes_for(path, lines):
                 break
             body.append((i + 1, l))
             i += 1
-        out.extend(_split_heredocs(body))
+        for _off, chunk in _split_heredocs(body):
+            out.extend(shell_scopes(chunk))
     return out
 
 
@@ -392,8 +424,33 @@ def check():
             bad.append(f"{p}:{i}: 分隔线不是 18 条: {l[:70]}")
     add(6, "分隔线四处同值 18 条", bad)
 
-    # 7 收尾区覆盖：需人工判断分支汇聚，这里只做提示
-    results.append((7, "收尾区覆盖（分支汇聚需人工）", "MANUAL", [], ""))
+    # 7 收尾区覆盖：按作用域判定「有标题却完全没有收尾区调用」。
+    # 分支汇聚（多条标题共用末尾一个 footer）在作用域内自然成立，无需人工。
+    bad = []
+    foot = re.compile(r"tg_add_footer|Get-TgFooter|tg_footer_line")
+    for p in all_files:
+        if not p.endswith((".sh", ".yml", ".yaml")):
+            continue
+        lines = open(p, encoding="utf-8", errors="replace").read().split("\n")
+        for start, body in scopes_for(p, lines):
+            # 只看代码行：文件头注释里常提到 tg_add_title / send_telegram_message，
+            # 计入会把「说明文字」误判成真实调用（task_preview / file_split 即此）
+            txt = "\n".join(l for _ln, l in body if not l.strip().startswith("#"))
+            # 只看「自己建标题 + 自己发出去」的作用域：只建消息不发（由调用方补 footer）
+            # 或只发不发标题（共享 _notify 助手）都不构成缺口。
+            has_title = ("tg_add_title" in txt or
+                         re.search(r"^\s*_?title\s*=", txt, re.M) is not None)
+            has_send = ANY_SEND.search(txt) is not None
+            if not (has_title and has_send):
+                continue
+            if foot.search(txt):
+                continue
+            # 常驻服务的报告时刻例外（规范 · 收尾区）
+            if "🕒" in txt:
+                continue
+            bad.append(f"{p}:{start}: 作用域内既建标题又发送，但没有收尾区调用"
+                       f"（tg_add_footer/Get-TgFooter/tg_footer_line/🕒）")
+    add(7, "收尾区覆盖（有标题必有收尾区）", bad)
 
     # 8 TG_RUN_URL 接线
     bad = []
