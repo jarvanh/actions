@@ -4257,6 +4257,12 @@ jobs:
           FINAL_ARCHIVE_BUDGET_MINUTES=26
           SAFETY_MARGIN_MINUTES=8
           DEADLINE_MINUTES=$((HARD_LIMIT_MINUTES - FINAL_ARCHIVE_BUDGET_MINUTES - SAFETY_MARGIN_MINUTES))
+          # 2026-11-11：死线公式落盘为真源 —— 看板（board.py）原先硬编码 332 分钟，
+          # 与本轮 326 相差 6 分钟，主人看到「TG 说 15 分钟 / 看板说 14 分钟」对不上。
+          # 消费者的正确姿势是读这个文件，而不是各自抄一遍公式。
+          printf 'DEADLINE_MINUTES=%s\nHARD_LIMIT_MINUTES=%s\nFINAL_ARCHIVE_BUDGET_MINUTES=%s\nSAFETY_MARGIN_MINUTES=%s\n' \
+            "$DEADLINE_MINUTES" "$HARD_LIMIT_MINUTES" "$FINAL_ARCHIVE_BUDGET_MINUTES" "$SAFETY_MARGIN_MINUTES" \
+            > /tmp/openclaw-deadline.env 2>/dev/null || true
           # tr -dc '0-9'：文件存在但为空/含杂字符时兜底为 0，避免算术表达式炸掉步骤
           JOB_START_EPOCH="$(cat /tmp/job-start-epoch 2>/dev/null | tr -dc '0-9' || true)"
           [ -n "${JOB_START_EPOCH}" ] || JOB_START_EPOCH=0
