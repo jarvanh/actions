@@ -87,7 +87,14 @@ handoff_put "$HANDOFF_NEW_REMOTE" "$(handoff_new_json rsync_started)"
 # 转储」而排除，属误判：剔除会让继任者丢失最多一个周期包（≤20 分钟）的真实会话
 # 记录。零丢失是硬约束，故恢复整目录同步。
 _zc_rc=0
+# 2026-11-11：zc 通道开 zstd 压缩。实测 zc 侧无法走增量（周期包 --exclude 'rollout'，
+# 继任者基座里没有 rollout → 6.83GB 全量重传，speedup 仅 1.19），42MB/s 下要 162s。
+# rollout 是 JSONL，实测压缩比 2.7x；用 zstd（而非 zlib）避免 CPU 成为新瓶颈
+#（zlib 单线程压 6.8GB ≈ 136s，基本吃掉全部收益）。
+# 代价：两端都是 ubuntu-latest 的 rsync 3.4.x，协议一致；不支持时 rsync 会报错，
+# 由 timeout/失败分支兜底（交接回退传统路径，零丢失不变）。
 ( timeout 780 rsync -a --delete --timeout=60 --stats \
+    --compress --compress-choice=zstd --compress-level=1 \
     rsync://"${OLD_TS_IP}:${HANDOFF_RSYNC_PORT}"/zc/ "$HOME/.zcode/" 2>&1 \
   | tail -n 4; exit "${PIPESTATUS[0]}" ) > /tmp/handoff-rsync-zc.log 2>&1 & _zc_pid=$!
 _rs_t0=$(date +%s)
