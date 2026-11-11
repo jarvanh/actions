@@ -36,6 +36,10 @@ grep -q '^  fi$' /tmp/ss_block.sh || { echo "FATAL: 抽取失败(无收尾 fi)";
 # 快照分支的辅助函数也抽真源（不是复写）
 sed -n '/^_subdir_sizes_from_snapshot()/,/^}$/p' "$_SRC" > "$WORK_DIR/snapfn.sh"
 [ -s "$WORK_DIR/snapfn.sh" ] || { echo "FATAL: 抽取 _subdir_sizes_from_snapshot 失败"; exit 1; }
+# 深层跳过分支依赖 _pair_share_binding（不抽会让条件恒假 → 静默回退枚举，
+# 测试就变成"看起来通过其实没测到"）
+sed -n '/^_pair_share_binding()/,/^}$/p' "$_SRC" >> "$WORK_DIR/snapfn.sh"
+grep -q '_pair_share_binding' "$WORK_DIR/snapfn.sh" || { echo "FATAL: 抽取 _pair_share_binding 失败"; exit 1; }
 source "$WORK_DIR/snapfn.sh"
 
 format_bytes() { echo "$1"; }
@@ -145,6 +149,45 @@ SNAP_FILE="$SNAP_DIR/does_not_exist.listing.json.gz"
 run_block $'big\nsmall' "onedrive:1" "999"
 _n=$(wc -l < "$CALLS_FILE")
 [ "$_n" -ge 2 ] && ok "D6 无快照 → 回退列举（${_n} 次）" || bad "D6 未回退，列举次数=${_n}"
+
+# ---------- E. 深层 + 份额生效: 完全不枚举（2026-11-11 加）----------
+# 现场（run 42957096246，head 82effd6）: 大对递归进 depth=1 后仍要全递归列举
+#   782 GiB / 6 万文件，第 11 对为此花了 23 分钟（06:20 → 06:43）然后份额到点
+#   ⇒ 0 B。整轮 12 个 0 B 对、净传仅 3.339 GiB（前一轮 42.469 GiB）。
+#   深层没有快照（该层从未写成功 marker ⇒ 鸡生蛋），故必须整段跳过枚举。
+OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 19000 ))
+OPENLIST_PAIR_DEADLINE_EPOCH=$(( $(date +%s) + 1200 ))
+: > "$CALLS_FILE"
+current_depth=1
+run_block $'zeta\nalpha\nmid' "onedrive:1" "839840000000"
+_n=$(wc -l < "$CALLS_FILE")
+[ "$_n" = "0" ] && ok "E1 depth=1 且份额生效 → 一次 rclone size 都没调用" \
+  || bad "E1 仍列举了 ${_n} 次"
+# 不能再排序（键全为 0，sort 不稳定会打乱）⇒ 必须是原列举顺序
+_ord=$(printf '%s' "$SORTED_OUT" | cut -d' ' -f2- | tr '\n' ',')
+[ "$_ord" = "zeta,alpha,mid," ] && ok "E2 保持 rclone lsf 的列举顺序（不排序、不打乱）" \
+  || bad "E2 顺序=[$_ord]"
+
+# E3: 深层但**无份额**（串行/调试）→ 必须保持原行为（仍枚举并排序）
+unset OPENLIST_PAIR_DEADLINE_EPOCH OPENLIST_SYNC_DEADLINE_EPOCH
+: > "$CALLS_FILE"
+current_depth=1
+run_block $'zeta\nalpha\nmid' "onedrive:1" "999"
+_n=$(wc -l < "$CALLS_FILE")
+[ "$_n" -ge 3 ] && ok "E3 depth=1 但无份额约束 → 仍枚举（串行/调试行为不变，${_n} 次）" \
+  || bad "E3 无份额却跳过枚举（会改变串行/调试行为，${_n} 次）"
+
+# E4: depth=0 + 份额生效 → 不走该捷径（外层仍按大小排序，便于小目录先完成）
+OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 19000 ))
+OPENLIST_PAIR_DEADLINE_EPOCH=$(( $(date +%s) + 1200 ))
+: > "$CALLS_FILE"
+current_depth=0
+run_block $'big\nsmall' "onedrive:1" "999"
+_n=$(wc -l < "$CALLS_FILE")
+[ "$_n" -ge 2 ] && ok "E4 depth=0 + 份额生效 → 仍按大小枚举排序（外层保留观感优化）" \
+  || bad "E4 depth=0 也跳过了枚举（${_n} 次）"
+unset OPENLIST_SYNC_DEADLINE_EPOCH OPENLIST_PAIR_DEADLINE_EPOCH
+current_depth=0
 
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"

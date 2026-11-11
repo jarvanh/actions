@@ -1581,6 +1581,26 @@ _sync_task_impl() {
     echo "只有 1 个子目录（${_sz_only}），跳过大小枚举（无排序需求；避免全递归列举吃掉整个份额）"
     subdir_size_map["$_sz_only"]=$_sz_only_bytes
     sorted_subdirs="${_sz_only_bytes} ${_sz_only}"$'\n'
+  elif [ "${current_depth:-0}" -ge 1 ] && _pair_share_binding; then
+    # ===== 深层 + 份额生效 → 完全不枚举，按列举顺序下发（2026-11-11 加）=====
+    # 现场（run 42957096246，head 82effd6，逐行核对）:
+    #   第 10 对 05:31 派发（份额 20min）→ 05:38 停开子目录 → 单子目录跳过枚举
+    #   → 进 depth=1 → 「按子目录大小排序...」→ 05:52 份额到点 → **0 B**；
+    #   第 11 对 06:20 depth=1 拆分 → 排序列举 **23 分钟** → 到点 → 0 B。
+    #   整轮 21 对里 12 个 0 B，净传只有 3.339 GiB（前一轮同机制下是 42.469 GiB）。
+    #   根因: 单子目录跳过只治最外层；递归进 `1024j`（782 GiB / 6 万文件）后
+    #   **这一层仍要对每个子目录跑全递归 rclone size**，而该层的源端清单快照
+    #   并不存在（该层从未成功写过 marker ⇒ 没有快照 ⇒ 鸡生蛋），于是每轮都
+    #   从头列举一次，永远进不了拷贝阶段。
+    #   排序在这个尺度上只是"小的先同步、进度好看"的观感优化，代价是整轮传不动
+    #   —— 取舍明确: 按列举顺序（字母序）直接下发，先把模块里第一件事变成"能传"。
+    #   只在"份额生效"时这么干: 串行/无份额（调试、还原、本机）保持原行为。
+    echo "depth=${current_depth} 且份额生效 → 跳过大小枚举（按列举顺序同步；避免全递归列举吃光份额）"
+    while IFS= read -r _sz_pre_line; do
+      [ -z "$_sz_pre_line" ] && continue
+      sorted_subdirs+="0 ${_sz_pre_line}"$'\n'
+    done <<< "$subdirs"
+    _sz_skip_sort=1
   else
   # ===== 优先用源端清单快照算子目录大小（2026-11-11 加）=====
   # 动因: 单子目录跳过枚举只治了**最外层**。task1 递归进 `1024j`（782 GiB /
@@ -1667,7 +1687,13 @@ _sync_task_impl() {
   rm -rf "$_sz_dir"
   fi   # ← 快照未覆盖时走列举（_snap_ok≠1）
   fi
-  subdirs=$(echo "$sorted_subdirs" | sort -n | cut -d' ' -f2-)
+  # 深层跳过枚举时不能再排序: 所有键都是 0，GNU sort 对相等键不保证稳定 ⇒
+  #   顺序会被打乱（且无意义）。保持 rclone lsf 的列举顺序（字母序）。
+  if [ "${_sz_skip_sort:-0}" = "1" ]; then
+    subdirs=$(printf '%s' "$sorted_subdirs" | cut -d' ' -f2-)
+  else
+    subdirs=$(echo "$sorted_subdirs" | sort -n | cut -d' ' -f2-)
+  fi
 
   # 预统计子目录总数（用于进度展示）
   local total_subdirs_count
