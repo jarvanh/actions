@@ -21,10 +21,17 @@ LOG_DIR="${HOME}/.openclaw/logs"
 # 用于兜底「源站已启动但监听稍慢」的竞态，避免隧道被永久跳过
 CFTUN_PORT_WAIT="${CFTUN_PORT_WAIT:-60}"
 
-# 单实例锁，避免并发调用打架
+# 单实例锁，避免并发调用打架。
+# 2026-11-11：原为 flock -n（抢不到就静默 exit 0）。健康看门狗与 workflow 步骤都会
+# 调 ensure，撞锁一方会**静默漏装/漏起**整条隧道 → Cloudflare 1033 且日志无线索。
+# 收敛本身只要几秒，改为有界等待；超时才跳过（仍不阻塞流程）。
 LOCK="/tmp/.cftun-$(id -u).lock"
 exec 9>"$LOCK" 2>/dev/null || true
-flock -n 9 2>/dev/null || { echo "[tunnels] 另一个实例正在运行，跳过"; exit 0; }
+CFTUN_LOCK_WAIT="${CFTUN_LOCK_WAIT:-120}"
+if ! flock -w "$CFTUN_LOCK_WAIT" 9 2>/dev/null; then
+  echo "[tunnels] 等待锁 ${CFTUN_LOCK_WAIT}s 超时（另一实例仍在运行），本次跳过"
+  exit 0
+fi
 
 mkdir -p "$LOG_DIR" 2>/dev/null || true
 
@@ -65,6 +72,9 @@ StandardError=append:${LOG_DIR}/cloudflared_${name}.log
 WantedBy=multi-user.target
 EOF
   sudo cp "$tmp" "$UNIT_DIR/$unit" 2>/dev/null
+  # mktemp 落的是 600；sudo cp 会保留该权限 → runner 读不到单元文件（排查时
+  # systemctl cat 直接 Permission denied）。统一改成 644，与手工 install 的单元一致。
+  sudo chmod 644 "$UNIT_DIR/$unit" 2>/dev/null
   rm -f "$tmp"
 }
 

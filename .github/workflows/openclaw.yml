@@ -2260,27 +2260,6 @@ jobs:
                 aux_fail_notify "clawhub npm 安装失败"
                 exit 1
               fi
-              # 2026-11-11：交接后「起得来但活不住」是 quota-board 的典型故障
-              #（Type=notify + 默认 90s 启动超时；新 VM 首次采集偏慢会被判超时杀掉，
-              #  Restart=always 反复重启 → 看板时有时无）。这里做 15s 稳定存活 + 端口
-              #  校验，失败就把单元状态与 journal 尾部打进日志，避免又是「静默掉线」。
-              sleep 15
-              _qb_st="$(systemctl --user is-active quota-board 2>/dev/null || true)"
-              _qb_port=0
-              (exec 3<>/dev/tcp/127.0.0.1/8321) 2>/dev/null && _qb_port=1
-              if [ "$_qb_st" != "active" ] || [ "$_qb_port" != "1" ]; then
-                echo "⚠️ [quota] 15s 后不稳定: unit=${_qb_st:-<空>} port8321=${_qb_port}"
-                systemctl --user status quota-board --no-pager 2>&1 | head -12 || true
-                journalctl --user -u quota-board --no-pager -n 20 2>/dev/null || true
-              else
-                echo "✅ [quota] 15s 稳定存活且 8321 在听"
-                # 2026-11-11：看板隧道在此启动（晚于看板就绪，避免 tunnels.sh 的
-                # 60s 端口等待落空 —— 那是「看板掉线」的根因之一）。
-                # 交接轮无需等旧轮：cutover 已把旧 VM 的 qb connector 一并停掉
-                #（切换空窗期不留半活实例），因此不存在两个 connector 分流。
-                [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ] \
-                  && bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure qb || true
-              fi
             )
             echo $? > "/tmp/post-health-${_bg_tag}.rc"
           ) > "/tmp/post-health-${_bg_tag}.log" 2>&1 &
@@ -2306,13 +2285,12 @@ jobs:
             # 2026-11-11：qb（看板 Mini App）**不在此处启动** —— 本步在交接轮里早于
             # 「Run quota-board」，而看板要等 AI 闸门放行才起（可能几分钟），
             # tunnels.sh 的端口等待只有 60s → qb 被静默跳过，看板公网入口直接缺失
-            #（主人实测的「看板掉线」根因之一）。改由看板步骤在确认看板存活后启动。
+            #（实测：qb.derrick.eu.org 报 Cloudflare 1033）。改由 Run quota-board
+            # 在确认看板存活后启动（含 tunnels.sh 缺失时的 nohup 兜底）。
           else
             nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc \
               > ~/.openclaw/logs/cloudflared_oc.log 2>&1 &
             echo $! > ~/.openclaw/logs/cloudflared_oc.pid
-            nohup cloudflared tunnel run --url http://127.0.0.1:8321 qb \
-              > ~/.openclaw/logs/cloudflared_qb.log 2>&1 &
           fi
 
           sleep 10
@@ -2521,9 +2499,37 @@ jobs:
               fi
               sleep 3
               systemctl --user is-active quota-board || true
-              # ⚠️ 2026-11-06 并行化调整：ensure qb 已移入同步的
-              # 「Run Cloudflared Tunnel」步骤。tunnels.sh 用 flock -n
-              #（抢不到锁直接跳过），与 ensure oc 并发会让 qb 隧道被静默漏掉。
+              # 2026-11-11：交接后「起得来但活不住」是 quota-board 的典型故障
+              #（Type=notify + 默认 90s 启动超时；新 VM 首次采集偏慢会被判超时杀掉，
+              #  Restart=always 反复重启 → 看板时有时无）。这里做 15s 稳定存活 + 端口
+              #  校验，失败就把单元状态与 journal 尾部打进日志，避免又是「静默掉线」。
+              #  ⚠️ 本检查必须留在**看板自己的步骤**里：此前它被放进「Install auxiliary
+              #  CLIs」，而那一步恒早于本步 → 探测到 unit=inactive → 直接跳过 ensure qb，
+              #  qb.derrick.eu.org 报 Cloudflare 1033（2026-11-11 实测）。
+              sleep 15
+              _qb_st="$(systemctl --user is-active quota-board 2>/dev/null || true)"
+              _qb_port=0
+              (exec 3<>/dev/tcp/127.0.0.1/8321) 2>/dev/null && _qb_port=1
+              if [ "$_qb_st" != "active" ] || [ "$_qb_port" != "1" ]; then
+                echo "⚠️ [quota] 15s 后不稳定: unit=${_qb_st:-<空>} port8321=${_qb_port}"
+                systemctl --user status quota-board --no-pager 2>&1 | head -12 || true
+                journalctl --user -u quota-board --no-pager -n 20 2>/dev/null || true
+              else
+                echo "✅ [quota] 15s 稳定存活且 8321 在听"
+                # 看板隧道必须在「看板确认就绪之后」启动（本步 else 分支）：
+                #  · 放 Run Cloudflared Tunnel → 看板未监听，60s 端口等待落空后静默跳过；
+                #  · 放 Install auxiliary CLIs → 该步早于本步，探测到看板未起就跳过。
+                # 交接轮无需等旧轮：cutover 已把旧 VM 的 qb connector 一并停掉
+                #（切换空窗期不留半活实例），因此不存在两个 connector 分流。
+                if [ -f "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ]; then
+                  bash "$GITHUB_WORKSPACE/.github/scripts/tunnels/tunnels.sh" ensure qb || true
+                else
+                  echo "⚠️ tunnels.sh 缺失，qb 隧道退回 nohup 兜底"
+                  nohup cloudflared tunnel run --url http://127.0.0.1:8321 qb \
+                    > "$HOME/.openclaw/logs/cloudflared_qb.log" 2>&1 &
+                  echo $! > "$HOME/.openclaw/logs/cloudflared_qb.pid"
+                fi
+              fi
               # Mini App 入口（TG 菜单按钮 web_app）—— 2026-10-19 迁到 @openclaw_sb_bot。
               # 按钮本体在 Telegram 服务端，不在任何本地持久化载体里（实测 2026-10-09
               # 丢过一次、靠人工重设），故每轮幂等重建：目标 bot 挂 web_app + 旧 bot

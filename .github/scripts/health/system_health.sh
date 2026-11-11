@@ -13,7 +13,8 @@
 # 判定项（任一 FAIL 即异常）：
 #   - /dropbox 是否挂载（持久化真源，缺了凭据/看板/配置全丢）
 #   - rclone-dropbox 服务是否 active
-#   - 已安装的 cftun-* 隧道是否 active（只查存在的单元，不要求全装）
+#   - cftun-* 隧道是否 active；并按 tunnels.conf 反向核对「源站在听却无单元」
+#     （从未安装的隧道也要能发现 —— 那正是 Cloudflare 1033 的静默形态）
 #   - quota-board 是否 active 且 8321 在听
 #   - OpenClaw gateway 18789 是否在听
 #
@@ -67,9 +68,41 @@ fi
 #（hosted runner 的 PID 1 随 job 启动，与 tg_add_footer 的时长兜底同口径）。
 boot_age_min=$(( ( $(date +%s) - $(stat -c %Y /proc/1 2>/dev/null || date +%s) ) / 60 ))
 
-# 3) 已安装的 cftun-* 隧道 —— 先自愈一次再判定
+# 3) cloudflared 隧道 —— 先按清单补齐缺失单元，再自愈已安装单元，最后判定
 # 2026-11-10：平行会话跑 handoff 测试时 cutover.sh 会真的 stop 生产隧道（测试隔离缺陷），
 # 隧道被停后不会自己回来。这里先 start 一次，3 秒后复检，仍起不来才告警。
+#
+# 2026-11-11：原实现只查「已安装」的 cftun-*，对「从未安装」完全失明 —— qb 因
+# ensure 落在看板就绪之前被静默跳过，qb.derrick.eu.org 报 Cloudflare 1033，而本脚本
+# 连续三轮 fails=0（实测）。改为按 tunnels.conf 反向核对：源站端口在听却没有单元
+# = 公网入口缺失，先调 tunnels.sh ensure 自愈一次，仍缺失才告警。
+if [ "$boot_age_min" -ge 40 ]; then
+  tun_sh=""
+  for cand in "${GITHUB_WORKSPACE:-}" "$HOME/ar6" "$HOME"/*; do
+    [ -n "$cand" ] && [ -f "$cand/.github/scripts/tunnels/tunnels.sh" ] \
+      && { tun_sh="$cand/.github/scripts/tunnels/tunnels.sh"; break; }
+  done
+  if [ -n "$tun_sh" ] && [ -f "$(dirname "$tun_sh")/tunnels.conf" ]; then
+    while IFS='|' read -r t_name t_args t_port; do
+      case "$t_name" in ''|\#*) continue ;; esac
+      # 源站不在听 → 这条隧道不是本机职责（清单含其他 workflow 的条目）
+      [ -n "$t_port" ] || continue
+      (exec 3<>/dev/tcp/127.0.0.1/"$t_port") 2>/dev/null || continue
+      t_unit="cftun-${t_name}.service"
+      # 用 LoadState 判断「是否已安装」——不能读单元文件本身（root 600，runner 无权读，
+      # `systemctl cat` 会 Permission denied → 把已存在的单元误判成缺失并重复 ensure）
+      [ "$(systemctl show -p LoadState --value "$t_unit" 2>/dev/null)" = loaded ] && continue
+      bash "$tun_sh" ensure "$t_name" >/dev/null 2>&1 || true
+      sleep 2
+      if systemctl is-active --quiet "$t_unit" 2>/dev/null; then
+        ok_notes+=("${t_name}=补齐(源站 :${t_port} 在听、单元曾缺失)")
+      else
+        fails+=("❌ ${t_name}: 源站 :${t_port} 在听但公网隧道缺失（Cloudflare 1033）")
+      fi
+    done < "$(dirname "$tun_sh")/tunnels.conf"
+  fi
+fi
+
 units=$(systemctl list-units --all --plain --no-legend 'cftun-*.service' 2>/dev/null | awk '{print $1}' | sed 's/\.service$//')
 healed=0
 for u in $units; do
