@@ -155,10 +155,18 @@ _pairs_parallel_reap_one() {
       # （trend_record_transferred 由各任务收尾追加），否则大文件一传几小时、
       # 心跳的"累计传输"纹丝不动（run 41196672258: 3h 停在 345.154 KiB，
       # 同期 rclone 实际在传 GiB 级）
-      local _beat_live_bytes=0 _beat_line
-      while IFS= read -r _beat_line; do
-        [[ "$_beat_line" =~ ^[0-9]+$ ]] && _beat_live_bytes=$((_beat_live_bytes + _beat_line))
-      done < "${TREND_TRANSFERRED_LOG:-/tmp/ol_trend_transferred.log}" 2>/dev/null || true
+      local _beat_live_bytes=0 _beat_line _beat_tf
+      # ⚠️ 必须显式判存在（2026-11-12 修，run 42957096246 日志实证）:
+      #   `done < nonexistent 2>/dev/null` 里的 2>/dev/null 只作用于循环体，
+      #   **重定向失败本身由 shell 打**到 stderr ⇒ 每 10 分钟一次心跳就刷一行
+      #   "/tmp/task_engine.sh: line 136: /tmp/ol_trend_transferred.log: No such file or directory"，
+      #   把真正的告警淹掉（该文件只在有传输结算时才创建）。
+      _beat_tf="${TREND_TRANSFERRED_LOG:-/tmp/ol_trend_transferred.log}"
+      if [ -f "$_beat_tf" ]; then
+        while IFS= read -r _beat_line; do
+          [[ "$_beat_line" =~ ^[0-9]+$ ]] && _beat_live_bytes=$((_beat_live_bytes + _beat_line))
+        done < "$_beat_tf"
+      fi
       echo "⏱ [心跳] 并行同步对等待中: 在跑 ${_beat_live} 个 · 已完成 ${_done_n}/${_pp_n} · 累计传输 $(format_bytes "${total_transferred:-0}") + 在途 $(format_bytes "$_beat_live_bytes") · 预算剩 ${_beat_left}"
     fi
     # 硬顶闸（2026-09-25 病灶 D 第五处）: 闸必须装在**轮询内部**，不能只装在
@@ -354,10 +362,13 @@ _run_registry_pairs_parallel() {
       #   会让人误判"整轮零产出"（实测我自己就先怀疑了一轮）。
       #   这里把实时记账文件（与心跳同源）的和一并报出，标明是"在途已结算"，
       #   不并入 total_transferred（那会与 trend 重复计数）。
-      local _pp_settled=0 _pp_line
-      while IFS= read -r _pp_line; do
-        [[ "$_pp_line" =~ ^[0-9]+$ ]] && _pp_settled=$((_pp_settled + _pp_line))
-      done < "${TREND_TRANSFERRED_LOG:-/tmp/ol_trend_transferred.log}" 2>/dev/null || true
+      local _pp_settled=0 _pp_line _pp_tf
+      _pp_tf="${TREND_TRANSFERRED_LOG:-/tmp/ol_trend_transferred.log}"
+      if [ -f "$_pp_tf" ]; then
+        while IFS= read -r _pp_line; do
+          [[ "$_pp_line" =~ ^[0-9]+$ ]] && _pp_settled=$((_pp_settled + _pp_line))
+        done < "$_pp_tf"
+      fi
       echo "⚠️ 硬顶放弃在途同步对 ${_pp_abandoned} 个（未完成，留待下个循环重试）"
       echo "   在途已结算 $(format_bytes "$_pp_settled")（来自实时记账文件，与心跳同源；不作为本轮完成量）"
     fi
