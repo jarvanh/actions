@@ -4410,6 +4410,14 @@ jobs:
         if: ${{ always() && steps.dropbox_preflight.conclusion != 'failure' }}
         run: |
           set -euo pipefail
+          # 2026-11-11：guard 让位取消的 cron 轮从未部署任何服务，归档必然全失败并刷
+          # 假告警（run 42950865534 实测：OmniRoute/rsstt「未初始化」、zcode 退出码 127）。
+          # always() 在取消状态下仍为真，故在此显式跳过。
+          if [ -f /tmp/openclaw-guard-declined ]; then
+            echo "ℹ️ 本轮由 handoff guard 让位取消（从未部署任何服务），跳过最终归档与告警"
+            echo "handoff_done=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # 通知真源在 step 顶层 source 一次（勿挪进下面的函数体，理由见启动步骤同名注释 / 规范 · 通知函数的正确接法）
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
           # 2026-10-22 对象级锁（值须与 Start background archive loop 侧保持一致，
@@ -5486,6 +5494,11 @@ jobs:
           # 变成「静默不发」；发送失败由末尾的 || echo ::warning:: 留痕（规范 · 发送层）
           set -uo pipefail
           # 凭据校验在 source 之前（规范 · 接线）
+          # 2026-11-11：guard 让位取消的轮次没有归档可报，别发「未完成」噪音
+          if [ -f /tmp/openclaw-guard-declined ]; then
+            echo "ℹ️ 本轮由 handoff guard 让位取消，跳过归档结果通知"
+            exit 0
+          fi
           if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
             echo "⚠️ Telegram secrets missing, skip final archive result notification."
             exit 0
