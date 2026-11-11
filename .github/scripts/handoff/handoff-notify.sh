@@ -44,17 +44,21 @@ case "$stage" in
     tg_add_note msg "此刻起到继任者网关就绪为下线窗口，通常在 1-3 分钟内。"
     ;;
   serving)
-    tg_add_title msg "🚀 OpenClaw 交接 · 新轮已上线"
-    tg_add_kv msg "阶段" "继任者网关已健康，聊天路径恢复"
-    [ -n "${KV[downtime]:-}" ] && tg_add_kv msg "下线时长" "$(tg_format_ms "${KV[downtime]}")"
+    # 2026-11-11 口径修正：这一条只代表「OpenClaw 聊天入口」可用
+    # （18789 /health=200 + 主机名回收），不代表模型通道就绪 ——
+    # 之前写「新轮已上线」会让人误以为 AI 网关也好了。两个指标分开说。
+    tg_add_title msg "🚀 OpenClaw 交接 · 聊天入口已恢复"
+    tg_add_kv msg "阶段" "继任者 OpenClaw 网关已健康（18789 /health=200），聊天可用"
+    [ -n "${KV[downtime]:-}" ] && tg_add_kv msg "聊天下线" "$(tg_format_ms "${KV[downtime]}")"
     [ -n "${KV[ai]:-}" ] && tg_add_kv msg "AI 数据" "${KV[ai]}"
-    tg_add_note msg "模型通道与看板随后自动就绪，全部服务可用时会再发一条。"
+    tg_add_note msg "AI 网关（OmniRoute + 上游）与看板随后就绪；全部服务可用时会再发一条并报整体下线时长。"
     ;;
   full)
     tg_add_title msg "🏁 OpenClaw 交接完成"
-    tg_add_kv msg "结果" "全部服务可用"
+    tg_add_kv msg "结果" "全部服务可用（含 AI 网关）"
     [ -n "${KV[downtime]:-}" ] && tg_add_kv msg "整体下线" "$(tg_format_ms "${KV[downtime]}")"
-    [ -n "${KV[chat]:-}" ] && tg_add_kv msg "聊天路径" "$(tg_format_ms "${KV[chat]}")"
+    [ -n "${KV[ai_ready]:-}" ] && tg_add_kv msg "AI 网关恢复" "$(tg_format_ms "${KV[ai_ready]}")"
+    [ -n "${KV[chat]:-}" ] && tg_add_kv msg "聊天入口" "$(tg_format_ms "${KV[chat]}")"
     [ -n "${KV[ai]:-}" ] && tg_add_kv msg "AI 数据" "${KV[ai]}"
     [ -n "${KV[run]:-}" ] && tg_add_path msg "新 run" "${KV[run]}"
     ;;

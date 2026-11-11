@@ -61,8 +61,17 @@ while :; do
     if [ "$ref" -gt 0 ] 2>/dev/null; then
       _total=$(( $(date +%s) - ref ))
       echo "★ 整体上线：旧轮停机 → 全部服务可用 = ${_total}s"
+      # 2026-11-11：单独报「AI 网关恢复」时刻（OmniRoute 起完的标记文件），
+      # 与聊天入口分开 —— 主人要求两个指标都写明，别混成一个「上线」。
+      _ai_ready=0
+      if [ -f /tmp/ai-gateway-started ]; then
+        _ai_ts=$(stat -c %Y /tmp/ai-gateway-started 2>/dev/null || echo 0)
+        case "$_ai_ts" in ''|*[!0-9]*) _ai_ts=0 ;; esac
+        [ "$_ai_ts" -gt "$ref" ] && _ai_ready=$(( _ai_ts - ref ))
+      fi
+      [ "$_ai_ready" -gt 0 ] && echo "★ AI 网关恢复：旧轮停机 → OmniRoute 就绪 = ${_ai_ready}s"
       _ai="Dropbox 回退"; [ -f /tmp/handoff-ai-fast.ok ] && _ai="rsync 直装"
-      bash "$here/handoff-notify.sh" full "downtime=$_total" "ai=$_ai" \
+      bash "$here/handoff-notify.sh" full "downtime=$_total" "ai=$_ai" "ai_ready=${_ai_ready}" \
         "run=${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID:-0}" || true
     else
       echo "★ 整体上线（无停机基准，单看本轮耗时 $(( $(date +%s) - P0 ))s）"
