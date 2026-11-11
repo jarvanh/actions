@@ -39,25 +39,142 @@
   模型通道 T0+6~10min 恢复（与旧版整条黑 ~8min 持平），网关/UI/Tailscale 先亮。
 - **归档循环**：继任者同样等 archives_done 才启动（防两台 VM 并发写同一个云包）。
 - **交接进度通知**（2026-11-11）：`.github/scripts/handoff/handoff-notify.sh` 在五个节点
-  发普通档通知 —— 准备中（T-12min 触发继任者）/ 继任者已就绪 / 已交出（开始下线）/
-  新轮已上线（带下线时长与 AI 数据传输方式）/ 交接完成（全部服务可用的整体下线时长）。
+  发普通档通知 —— 准备中（自动=T-12min / 手动=立即，且明确催促停写）/ 继任者已就绪 /
+  已交出（开始下线）/ **OpenClaw 聊天入口已恢复**（只看 18789 `/health=200`，不代表模型通道）/
+  交接完成（整体下线 + AI 网关恢复 + 新 run 链接）。run id 均可点击。
   无凭据或发送失败一律静默，不影响交接。
 - **可观测性**：Phase 0 埋点在每轮收尾日志输出 `[phase0]` 段（增量字节/文件数/直连评估），
   用于校准 rsync 增量交接的实际收益。
 
-### 三个手动开关（2026-11-11）
+### 手动交接与三个开关（2026-11-11）
 
-生产上要「按需」测交接或按需回退传统路径时用，不必等死线、也不必回滚代码。
+生产上要「按需」测交接、或按需回退传统路径时用，不必等死线、也不必回滚代码。
+三个开关的**分工**：先决定这一轮「是否参与交接」，再决定「现在就开始」还是「到点再说」。
 
-| 开关 | 用法 | 语义 |
+#### ① 立即交接（`/tmp/openclaw-handoff-request`）
+
+```bash
+ssh runner@openclaw 'touch /tmp/openclaw-handoff-request'
+# 已在机器上：touch /tmp/openclaw-handoff-request
+```
+
+必须落在**正在服务的那台 VM**（持有 Tailscale 名 `openclaw`、跑着 `Keep alive` 的那一轮）；
+写到别的机器上完全没有效果。默认路径可用 `HANDOFF_FORCE_FILE` 覆盖（测试隔离用）。
+
+前置条件（缺一项就静默不生效，这是最常见的「点了没反应」原因）：
+
+| 条件 | 检查 |
+|---|---|
+| 仓库变量 `OPENCLAW_HANDOFF=1` | `gh variable list -R jarvanh/actions`（`tick.sh` 开头直接 `exit 0`） |
+| 当前轮的 `tick.sh` 支持该开关（≥ `e220414`） | 老 run 不认识这个文件 |
+| 没有上一次交接的残留 | `ls /tmp/openclaw-handoff/successor-run-id`；有则**不会再派发** |
+| runner 上 `gh` 可 dispatch | `tick.sh` 用 `gh workflow run -f handoff_of=<本轮 id>` |
+
+执行链（每一步都可在 `Keep alive` 日志里看到）：
+
+| 步骤 | 位置 | 行为 |
 |---|---|---|
-| 立即交接 | `ssh runner@openclaw 'touch /tmp/openclaw-handoff-request'` | 不等 T-12min，**立刻派发继任者**；`tick.sh` 每 15s 查一次，等继任者 `ready` 后写 restart-request → Keep alive 退出 → 收尾步骤 `cutover.sh` 接管并等 `serving`。继任者放弃（aborted）时自动解除、保持正常保活 |
-| 传统提前收尾 | `ssh runner@openclaw 'touch /tmp/openclaw-restart-request'` | 不派发继任者，直接进入收尾（停服 → 归档 → Trigger next）。最坏丢 ≤20min 增量，主包因「临时对象 + 尺寸校验 + 原子改名」不会被半截包覆盖 |
-| 启动方式 | 手动运行 workflow 时选 `startup_mode` | `auto`=跟随仓库变量 `OPENCLAW_HANDOFF`；`handoff`=强制按交接模式（定点验证）；`traditional`=强制传统（本轮不派发继任者、不交出）。与 `handoff_of` 分工：前者决定「是否参与交接」，后者决定「本轮是不是继任者」 |
+| 轮询 | `Keep alive` 每 15s 调 `tick.sh` | ≤15s 内发现开关 |
+| 派发继任者 | `tick.sh` §1 | `gh workflow run openclaw.yml --ref main -f handoff_of=<本轮 id> -f ai_backend=<当前后端>` |
+| 武装 | 同上 | 写 `successor-run-id` / `enabled`，发「准备中（手动）」通知 |
+| 等 ready | `tick.sh` §4 | 继任者 `new.json=ready` 后写 `/tmp/openclaw-restart-request`，删除开关文件 |
+| 提前收尾 | `Keep alive` | 看到 restart-request → 退出循环 |
+| 交出 | `cutover.sh` | checkpoint → 停看门狗（timer+**service**）→ 落 `switching` 标记 → 停全部服务/隧道 → rsync → `handing_over` → 等 `serving` |
+| 接管 | 继任者 `takeover.sh` | rsync 增量 → 校验 → 起服务 → `serving` |
 
-> 立即交接**不会**跳过继任者的基座恢复（~10-12min）：`cutover.sh` 只给继任者 5min 的
-> `ready` 等待，硬提前交出会退化成传统收尾、白停一次。`tick.sh` 因此采取「先派发、
-> 等 ready、再交出」两段式。
+**为什么不能一触即交**：`cutover.sh` 只给继任者 5 分钟的 `ready` 等待，而基座恢复要 2-3 分钟
+（实测），硬提前会超时退化成传统收尾、白停一次。所以是「先派发 → 等 ready → 再交出」两段式。
+
+实测（2026-11-11 五次）：
+
+| 指标 | 范围 |
+|---|---|
+| 触发 → 继任者派发 | 5-20s |
+| 触发 → 交出（cutoff） | ~3min |
+| **聊天下线**（cutoff → serving） | **197-238s** |
+| AI 网关恢复（cutoff → OmniRoute 就绪） | 182s（`OPENCLAW_AI_EARLY=1` 时常早于聊天） |
+| **整体可用**（cutoff → 8/8） | **252-296s** |
+
+通知依次为：准备中（手动版含「⚠️ 请现在就停止写入」）→ 继任者已就绪 → 已交出 →
+聊天入口已恢复 → 交接完成（整体下线 / AI 网关恢复）。run id 均为可点链接。
+
+取消与回退：
+
+| 时机 | 操作 | 结果 |
+|---|---|---|
+| 开关刚写入、未被轮询 | `rm -f /tmp/openclaw-handoff-request` | 什么都不会发生 |
+| 继任者已派发、未 ready | `gh run cancel <继任者 id>` | 下一轮 tick 检测到已终止 → 解除武装，正常保活 |
+| 继任者 `aborted` | 自动 | 删除开关、保持正常保活（不交接） |
+| cutover 失败 | 自动 `abort_handoff` | 旧轮拉起服务、清 `switching` 标记、走传统收尾 |
+
+清理残留（手动/自动交接中断后）：
+```bash
+ssh runner@openclaw 'rm -f /tmp/openclaw-handoff/{successor-run-id,enabled,ready-ok}'
+```
+
+#### ② 传统提前收尾（`/tmp/openclaw-restart-request`）
+
+```bash
+ssh runner@openclaw 'touch /tmp/openclaw-restart-request'
+```
+
+不派发继任者，直接进入收尾（停服 → 归档 → Trigger next）。最终归档完整，
+但恢复要靠下一轮冷启动（约 9-10 分钟）。最坏丢 ≤20min 增量；主包因
+「临时对象 + 尺寸校验 + 原子改名」不会被半截包覆盖。
+
+#### ③ 启动方式（`startup_mode`）
+
+手动运行 workflow 时选择：
+
+| 值 | 语义 |
+|---|---|
+| `auto`（默认） | 跟随仓库变量 `OPENCLAW_HANDOFF` |
+| `handoff` | 强制按交接模式（即使变量被关掉，定点验证用） |
+| `traditional` | 强制传统：本轮不派发继任者、不交出 |
+
+与 `handoff_of` 的分工：`startup_mode` 决定「本轮是否参与交接」，`handoff_of` 决定「本轮是不是继任者」。
+
+#### 网页端 Cancel 会怎样（实测对照）
+
+`Trigger next` 要求 `steps.keepalive.conclusion == 'success'`，**cancel 时该步是 `cancelled`**
+→ 不会自己派下一轮；下一轮只能来自 cron（`*/5`），是普通 serve 轮 → **传统冷启动**
+（若取消时继任者已武装，它会因旧轮 `cancelled` 而 `abort_takeover` 自我取消）。
+
+2026-11-11 16:18 实测（提交 cancel 那次）：
+
+| 口径 | 时长 |
+|---|---|
+| 提交 cancel → 旧 job 真正结束 | 240s（宽限期内收尾步骤**未执行**） |
+| job 结束 → 下一轮 cron 起跑 | 367s（`*/5` 调度；guard 空转一轮再加 5min） |
+| job 结束 → 聊天恢复 | 535s ≈ 8.9min |
+| job 结束 → 8/8 全就绪 | 591s ≈ 9.8min |
+| **从点 Cancel 到 8/8** | **831s ≈ 13.8min** |
+
+| 方式 | 服务停 → 聊天 | 服务停 → 8/8 | 最终归档 | 数据风险 |
+|---|---|---|---|---|
+| 网页 Cancel | **8.9min** | 9.8min | 大概率不执行 | 最坏丢 ≤20min |
+| 立即交接 | **3.5min** | 4.2min | 完整 | 零丢失 |
+| 传统提前收尾 | 8.9min | 9.8min | 完整 | 零丢失 |
+
+结论：要重启生产，**立即交接在每一项上都优于 Cancel**；Cancel 的停机窗口约为其 3 倍。
+
+#### 时间口径：「数据冻结」不是「最终归档」
+
+- **数据冻结** = 收尾里「2.5 停 OpenClaw 网关」那一刻，此后写入不进最终快照（会丢）。
+  实测：死线（Keep alive 退出）→ 停网关只差 **7s**；正常轮前面还要停 rsstt，最坏 ~70s。
+  `deadline.sh` 落 `FREEZE_DELAY_SECONDS=10`（取实测下界，宁早勿晚）。
+- **最终归档上传完成**比冻结晚约 **4 分钟**（实测冻结 20:01:13 / 上传完成 20:05:08）——
+  旧看板把这一行叫「最终归档」会误导。
+- 看板现在两行：
+  - `数据冻结`：倒计时到冻结时刻（= job 起点 + 326min + 10s），剩余 <60min 转红。
+  - `最近归档`：主包 mtime + `（交接时）`/`（周期）`；判定窗口 = cutoff 起 30 分钟内。
+
+#### 切换窗口内看门狗静默
+
+cutover 在停服务**之前**落 `/tmp/openclaw-handoff/switching`：
+`system_health.sh` 见到标记直接静默退出，`gateway-watchdog.py` 见到则返回空不探测。
+原因：只停 timer 拦不住**已在跑的 oneshot** —— 2026-11-11 21:22 交接瞬间曾误报
+「18789 未监听 + 7/8」。abort 回退时删除该标记（服务会被拉起）。
 
 
 ### 步骤顺序
