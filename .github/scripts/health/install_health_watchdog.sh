@@ -28,6 +28,11 @@ install -m 644 "$ROOT/.github/scripts/handoff/protocol.sh" "$BIN/protocol.sh"
 # 凭据：优先 alert 档（重要通知走 @SaberFuckBot），缺失时退回主 bot
 tok="${TELEGRAM_BOT_TOKEN_ALERT:-${TELEGRAM_BOT_TOKEN:-}}"
 chat="${TELEGRAM_CHAT_ID_ALERT:-${TELEGRAM_CHAT_ID:-}}"
+# 2026-11-11：凭据为空 = 看门狗装上了但永远不会出声（qb 事件里全程静默的另一半原因）。
+# 不静默放过：明确喊出来，让日志/注解里能一眼看到「这台机器的 VM 级告警是哑的」。
+if [ -z "$tok" ] || [ -z "$chat" ]; then
+  echo "::warning::[health] TG 凭据为空（TELEGRAM_BOT_TOKEN_ALERT/TELEGRAM_BOT_TOKEN 均未注入）—— 看门狗将无法告警" >&2
+fi
 umask 077
 {
   echo "TELEGRAM_BOT_TOKEN=${tok}"
