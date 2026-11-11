@@ -163,10 +163,14 @@ OPENLIST_PAIR_DEADLINE_EPOCH=$(( $(date +%s) + 1200 ))       # 本对份额 20mi
 if _pair_share_binding; then ok "F1 份额比全局更近 → 判定为生效约束"; else bad "F1 未识别出份额为生效约束"; fi
 if _batch_budget_stop; then bad "F2 20min 份额下批次闸恒真（一个批次都开不起来 = 同步停死）"; else ok "F2 20min 份额仍可开批次（不套用 2h 片长）"; fi
 if _subdir_budget_stop; then bad "F3 20min 份额下子目录闸恒真（一个子目录都开不起来）"; else ok "F3 20min 份额仍可开子目录（不套用 25% 修复预留）"; fi
-# 份额只剩 5min（< 最小片）⇒ 两闸都应判停（不再开新单元）
+# 份额剩 2min（< 收尾预留 120s 的边界附近）⇒ 两闸都应判停（不再开新单元）
+OPENLIST_PAIR_DEADLINE_EPOCH=$(( $(date +%s) + 90 ))
+if _batch_budget_stop; then ok "F4 份额剩 90s → 批次闸判停（留收尾）"; else bad "F4 份额剩 90s 仍开批次"; fi
+if _subdir_budget_stop; then ok "F5 份额剩 90s → 子目录闸判停（留收尾）"; else bad "F5 份额剩 90s 仍开子目录"; fi
+# 而剩 5min 时必须**还能干活**（旧行为用 600s 预留，把 20min 份额砍成 10min 可用）
 OPENLIST_PAIR_DEADLINE_EPOCH=$(( $(date +%s) + 300 ))
-if _batch_budget_stop; then ok "F4 份额剩 5min → 批次闸判停"; else bad "F4 份额剩 5min 仍开批次"; fi
-if _subdir_budget_stop; then ok "F5 份额剩 5min → 子目录闸判停"; else bad "F5 份额剩 5min 仍开子目录"; fi
+if _batch_budget_stop; then bad "F5b 份额剩 5min 却不许开批次（可用窗口被吃光）"; else ok "F5b 份额剩 5min → 仍可开批次（单元会被夹到份额终点）"; fi
+if _subdir_budget_stop; then bad "F5c 份额剩 5min 却不许开子目录"; else ok "F5c 份额剩 5min → 仍可开子目录"; fi
 # 无份额时，两闸必须回到原尺度（不得因本次改动放宽全局约束）
 unset OPENLIST_PAIR_DEADLINE_EPOCH
 if _pair_share_binding; then bad "F6 无份额却判为生效"; else ok "F6 无份额 → 不生效"; fi
@@ -210,9 +214,28 @@ unset OPENLIST_PAIR_DEADLINE_EPOCH OPENLIST_SYNC_DEADLINE_EPOCH
   || bad "H1 实得 $(_subdir_reserve_seconds)"
 OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 19000 ))
 OPENLIST_PAIR_DEADLINE_EPOCH=$(( $(date +%s) + 1200 ))
-[ "$(_subdir_reserve_seconds)" = "600" ] \
-  && ok "H2 份额生效 → 预留退到最小片 600s（20min 份额下才开得动子目录）" \
+[ "$(_subdir_reserve_seconds)" = "120" ] \
+  && ok "H2 份额生效 → 收尾预留退到 120s（20min 份额不再被砍成 10min 可用）" \
   || bad "H2 实得 $(_subdir_reserve_seconds)"
+# 20min 份额下必须留出**足够干活**的窗口: 1200 − 120 = 1080s > 5min 列举开销
+_w=$(( 1200 - $(_subdir_reserve_seconds) ))
+[ "$_w" -ge 900 ] \
+  && ok "H2b 20min 份额实际可用 ${_w}s ≥ 15min（够 12 个子目录列举+逐个判跳过）" \
+  || bad "H2b 可用窗口仅 ${_w}s"
+# 批次闸同样必须用份额收尾预留，否则 20min 份额下批次路径恒真（一个批次都开不起来）
+if _batch_budget_stop; then bad "H2c 20min 份额下批次闸恒真（同步停死）"; else ok "H2c 20min 份额仍可开批次"; fi
+OPENLIST_PAIR_DEADLINE_EPOCH=$(( $(date +%s) + 90 ))
+if _batch_budget_stop; then ok "H2d 份额剩 90s → 批次闸判停（仍留收尾）"; else bad "H2d 份额剩 90s 却开批次"; fi
+OPENLIST_PAIR_DEADLINE_EPOCH=$(( $(date +%s) + 1200 ))
+OPENLIST_PAIR_TAIL_RESERVE_SECONDS=60
+[ "$(_subdir_reserve_seconds)" = "60" ] \
+  && ok "H2e 预留量可调（显式 60s 生效）" \
+  || bad "H2e 实得 $(_subdir_reserve_seconds)"
+OPENLIST_PAIR_TAIL_RESERVE_SECONDS=0
+[ "$(_subdir_reserve_seconds)" = "60" ] \
+  && ok "H2f 非法/过小的预留被抬到 60s 下限（不会 0 预留导致开不完就截断）" \
+  || bad "H2f 实得 $(_subdir_reserve_seconds)"
+unset OPENLIST_PAIR_TAIL_RESERVE_SECONDS
 OPENLIST_PAIR_DEADLINE_EPOCH=$(( OPENLIST_SYNC_DEADLINE_EPOCH + 5000 ))
 [ "$(_subdir_reserve_seconds)" = "4800" ] \
   && ok "H3 份额比全局更远 → 仍用全局修复预留（份额不放大约束）" \

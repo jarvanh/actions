@@ -121,6 +121,15 @@ OPENLIST_PAIR_PARALLEL="${OPENLIST_PAIR_PARALLEL:-2}"   # 1=串行；>=2=按后�
 #   参见 openlist_api.sh 里"短路标记必须落文件"的实测注释）。
 # 未注入预算锚点（调试/还原/本机单测）→ 不设份额，行为与改动前完全一致。
 OPENLIST_PAIR_MIN_SLICE_SECONDS="${OPENLIST_PAIR_MIN_SLICE_SECONDS:-1200}"  # 20min
+# 份额内的"收尾预留"（2026-11-11 加，run 42887432510 实证）:
+#   原先份额生效时子目录闸直接沿用全局最小片 600s 当预留，于是 **20min 份额
+#   实际只有 10min 干活**。而 backup / backup-aliyundrive 这类对的固定开销是
+#   "列举 12 个子目录 ≈ 5min + 逐个判 1d-skip"，走到一半份额就到点 ⇒ 不写
+#   pair 级 marker ⇒ 下轮重来 ⇒ **永远 0 B、永远 failed**（两个 backup 对在
+#   两个轮次里都是 0 B，`backup` 更是唯一从未成功收尾的同步对）。
+#   份额内部其实没有"整轮尾部"要保护 —— 只需几十秒收敛并落 marker，故给 120s。
+#   （全局预算仍用 OPENLIST_SYNC_MIN_SLICE_SECONDS / 修复预留，语义不变）
+OPENLIST_PAIR_TAIL_RESERVE_SECONDS="${OPENLIST_PAIR_TAIL_RESERVE_SECONDS:-120}"
 
 # 收割一个完成的同步对 worker（阻塞轮询；结果文件为准 + kill -0 兜底，
 # 与 _sync_par_reap_one 同策略: wait -n -p 对被杀子进程不回填 pid）
@@ -580,15 +589,20 @@ _repair_reserve_seconds() {
   echo "$r"
 }
 # 子目录循环的"预留量"（单一来源，2026-11-11 抽出）:
-#   份额生效（并行 worker 内、且份额比全局锚点更近）→ 最小片（默认 600s）:
-#     份额内不必再为"整轮尾部"预留修复时间，尾部保护由份额本身承担。
+#   份额生效（并行 worker 内、且份额比全局锚点更近）→ OPENLIST_PAIR_TAIL_RESERVE_SECONDS
+#     （默认 120s）: 份额内部没有"整轮尾部"要保护，只需几十秒收敛并落 marker。
+#     此前这里用全局最小片 600s ⇒ 20min 份额只剩 10min 干活，backup 系列对
+#     走到一半就到点、永远写不出 pair marker（实测两轮均 0 B）。
 #   否则 → OPENLIST_REPAIR_RESERVE_PCT 比例的全局预留（长尾修复需要它）。
 # 为什么必须抽出来: 判据与**日志文案**必须同一来源 —— 此前日志固定打印
-#   `_repair_reserve_seconds`（4800s），而份额生效时判据实际用的是 600s，
+#   `_repair_reserve_seconds`（4800s），而份额生效时判据实际用的是别的值，
 #   日志与行为不一致（run 42830717609 现场可见「尾部 4800s」却提前收摊）。
 _subdir_reserve_seconds() {
   if _pair_share_binding; then
-    echo "${OPENLIST_SYNC_MIN_SLICE_SECONDS:-600}"
+    local r="${OPENLIST_PAIR_TAIL_RESERVE_SECONDS:-120}"
+    [[ "$r" =~ ^[0-9]+$ ]] || r=120
+    [ "$r" -lt 60 ] && r=60
+    echo "$r"
   else
     _repair_reserve_seconds
   fi
@@ -646,9 +660,10 @@ _batch_budget_stop() {
   [ -n "$_dl" ] || return 1
   if _pair_share_binding; then
     # 份额生效: 不再要求"够一个完整批次片长"(默认 2h)，否则 20min 份额恒真、
-    #   批次路径完全不启动；退到最小片即可 —— 批次内是逐文件传，到点被
-    #   timeout 截断属部分成功（rc=124），未传部分下轮接力。
-    r="${OPENLIST_SYNC_MIN_SLICE_SECONDS:-600}"
+    #   批次路径完全不启动；退到**份额收尾预留**即可（同 _subdir_reserve_seconds:
+    #   份额内没有整轮尾部要保护）。此前用全局最小片 600s，等于把 20min 份额
+    #   砍成 10min 可用，backup 系列对因此永远走不完子目录、写不出 pair marker。
+    r=$(_subdir_reserve_seconds)
   else
     r=$(_batch_slice_effective)
   fi
