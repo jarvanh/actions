@@ -21,12 +21,17 @@ if [ "$old_run" = "${GITHUB_RUN_ID}" ]; then
   state="$(handoff_get "$HANDOFF_OLD_REMOTE" '.state')"
   case "$state" in
     handoff_done)
-      echo "ℹ️ [handoff] old.json 已是 handoff_done（移交成功），保留终态，不再改回 archives_done"
+      # 终态保留（state 不回退），但必须补上「归档完成」信号 —— 否则继任者的
+      # archives_done 闸门永远等不到（实测 2026-11-11 19:18 卡 30 分钟，
+      # 归档循环/保活全被挡住，gateway-watchdog 报 archive-loop 未运行）。
+      handoff_put "$HANDOFF_OLD_REMOTE" \
+        "$(handoff_old_json handoff_done "${succ:-0}" "${ip:-}" "${cm:-0}" "${bm:-0}" true)"
+      echo "✅ [handoff] old.json：handoff_done 终态保留 + archives_done=true（闸门放行）"
       exit 0
       ;;
   esac
 else
   succ=0; ip=""; cm=0; bm=0
 fi
-handoff_put "$HANDOFF_OLD_REMOTE" "$(handoff_old_json archives_done "${succ:-0}" "${ip:-}" "${cm:-0}" "${bm:-0}")"
+handoff_put "$HANDOFF_OLD_REMOTE" "$(handoff_old_json archives_done "${succ:-0}" "${ip:-}" "${cm:-0}" "${bm:-0}" true)"
 echo "✅ [handoff] old.json → archives_done（继任者上游闸门放行）"

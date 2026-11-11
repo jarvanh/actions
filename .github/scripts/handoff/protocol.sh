@@ -91,9 +91,22 @@ handoff_run_status() { # <run_id> → queued|in_progress|completed|unknown
 }
 
 # 手写 JSON 免转义坑：字段全是受控值（数字/枚举/IP），不拼接用户输入
-handoff_old_json() { # <state> <successor_run> <old_ts_ip> <cutoff_epoch> <base_marker>
-  printf '{"protocol":%d,"role":"old","old_run":%s,"successor_run":%s,"state":"%s","old_ts_ip":"%s","cutoff_epoch":%s,"base_marker":%s,"ts":%s}' \
-    "$HANDOFF_PROTOCOL" "${GITHUB_RUN_ID:-0}" "${2:-0}" "$1" "${3:-}" "${4:-0}" "${5:-0}" "$(date +%s)"
+handoff_old_json() { # <state> <successor_run> <old_ts_ip> <cutoff_epoch> <base_marker> [archives_done true|false]
+  # 2026-11-11：新增 archives_done 布尔字段。原因：移交成功后 state 必须保持
+  # handoff_done（终态），但继任者的 archives_done 闸门需要「最终归档已完成」
+  # 这个独立信号 —— 两者用同一字段互相覆盖，必然有一方失效（实测：闸门空等 25min）。
+  printf '{"protocol":%d,"role":"old","old_run":%s,"successor_run":%s,"state":"%s","old_ts_ip":"%s","cutoff_epoch":%s,"base_marker":%s,"archives_done":%s,"ts":%s}' \
+    "$HANDOFF_PROTOCOL" "${GITHUB_RUN_ID:-0}" "${2:-0}" "$1" "${3:-}" "${4:-0}" "${5:-0}" "${6:-false}" "$(date +%s)"
+}
+
+# 归档是否已全部上传（归属校验；true|false）。与 state 解耦：handoff_done 终态下
+# 仍可置 true，供 gate.sh archives_done 放行，且不会被后续标记覆盖回 false。
+handoff_old_archives_done() { # <old_run 期望值>
+  local owner v
+  owner="$(handoff_get "$HANDOFF_OLD_REMOTE" '.old_run')"
+  [ "$owner" = "$1" ] || { printf 'false'; return 0; }
+  v="$(handoff_get "$HANDOFF_OLD_REMOTE" '.archives_done')"
+  printf '%s' "${v:-false}"
 }
 
 handoff_new_json() { # <state>

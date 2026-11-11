@@ -43,6 +43,10 @@ for _i in $(seq 1 $(( wait_sec / 5 ))); do
       ;;
     archives_done)
       case "$_st" in archives_done) : > "$PASS_FILE"; exit 0 ;; handoff_aborted) : > "$PASS_FILE"; exit 0 ;; esac
+      # 2026-11-11：移交成功时 state 保持 handoff_done（终态），归档完成改用
+      # 独立字段 archives_done=true 表达 —— 否则闸门永远等不到（实测卡 30min，
+      # 归档循环/保活被挡，watchdog 报 archive-loop 未运行）。
+      case "$(handoff_old_archives_done "${HANDOFF_OF}")" in true) : > "$PASS_FILE"; exit 0 ;; esac
       ;;
     ai_archives_done)
       # 两条路取先到者：
