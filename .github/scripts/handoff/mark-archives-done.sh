@@ -14,6 +14,17 @@ if [ "$old_run" = "${GITHUB_RUN_ID}" ]; then
   ip="$(handoff_get "$HANDOFF_OLD_REMOTE" '.old_ts_ip')"
   cm="$(handoff_get "$HANDOFF_OLD_REMOTE" '.cutoff_epoch')"
   bm="$(handoff_get "$HANDOFF_OLD_REMOTE" '.base_marker')"
+  # 2026-11-11 实测：移交成功时 cutover 已把 old.json 写成 handoff_done，
+  # 而本脚本在其后的归档步骤才跑 —— 无条件写 archives_done 会把终态覆盖掉
+  #（现场：new.json=serving 17:15，old.json 却回退成 archives_done 17:19）。
+  # 终态语义必须保留：handoff_done = 已移交、本轮转纯备份。
+  state="$(handoff_get "$HANDOFF_OLD_REMOTE" '.state')"
+  case "$state" in
+    handoff_done)
+      echo "ℹ️ [handoff] old.json 已是 handoff_done（移交成功），保留终态，不再改回 archives_done"
+      exit 0
+      ;;
+  esac
 else
   succ=0; ip=""; cm=0; bm=0
 fi
