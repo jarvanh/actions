@@ -5637,6 +5637,9 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           ARCHIVE_STEP_CONCLUSION: ${{ steps.final_archive.conclusion }}
+          # 2026-11-11：交接轮的最终归档只是「交接后备份」，标题必须写明 ——
+          # 同一个 ✅ 文案在传统轮=本轮结束、在交接轮=旧轮冻结态备份（服务早已在新轮上）。
+          HANDOFF_DONE: ${{ steps.final_archive.outputs.handoff_done }}
         run: |
           # 刻意不用 set -e：本步骤的任务是把已归档的结果送出去，任何一处判断失误都不该
           # 变成「静默不发」；发送失败由末尾的 || echo ::warning:: 留痕（规范 · 发送层）
@@ -5655,6 +5658,12 @@ jobs:
 
           RESULTS_FILE="/tmp/openclaw-final-archive-results.tsv"
 
+          # 交接轮：这里的归档是旧轮交出后的**灾备备份**（用户已在继任者上），
+          # 标题/说明都要写清楚，避免被读成「本轮刚结束、马上要冷启动」。
+          _is_handoff=0
+          [ "${HANDOFF_DONE:-0}" = "1" ] && _is_handoff=1
+          if [ "$_is_handoff" = 1 ]; then _label="交接后备份"; else _label="最终归档"; fi
+
           msg=""
           # 归档步骤在记录任何结果前就结束了（预检 exit 1 / 运行被取消）：降级为「未完成」
           if [ ! -s "$RESULTS_FILE" ]; then
@@ -5665,7 +5674,7 @@ jobs:
               skipped)   _verdict="归档步骤被跳过" ;;
               *)         _verdict="归档步骤未执行" ;;
             esac
-            tg_add_title msg "⚠️ OpenClaw 最终归档未完成"
+            tg_add_title msg "⚠️ OpenClaw ${_label}未完成"
             tg_add_kv msg "结论" "$_verdict"
             tg_add_note msg "本轮没有产出归档明细，云端归档保持上一轮状态。"
             tg_add_footer msg
@@ -5701,11 +5710,11 @@ jobs:
 
           # 标题按严重度降级（规范 · 状态图标）：全败 ❌ > 有失败 ⚠️ > 全成 ✅
           if [ "$fail_n" -gt 0 ] && [ "$ok_n" -eq 0 ]; then
-            tg_add_title msg "❌ OpenClaw 最终归档失败"
+            tg_add_title msg "❌ OpenClaw ${_label}失败"
           elif [ "$fail_n" -gt 0 ]; then
-            tg_add_title msg "⚠️ OpenClaw 最终归档完成 · 部分失败"
+            tg_add_title msg "⚠️ OpenClaw ${_label}完成 · 部分失败"
           else
-            tg_add_title msg "✅ OpenClaw 最终归档完成"
+            tg_add_title msg "✅ OpenClaw ${_label}完成"
           fi
 
           # 计数只列非零项，避免「失败 0」这种与标题自相矛盾的写法（规范 · 计数与量化）
@@ -5720,6 +5729,9 @@ jobs:
 
           tg_add_section msg "📦 归档明细 · $((ok_n + fail_n + skip_n))"
           tg_add_block msg "$(tree_lines "$entries")"
+          if [ "$_is_handoff" = 1 ]; then
+            tg_add_note msg "本轮已交接：服务已在继任者上运行，此包是旧轮冻结态的灾备备份，不阻塞任何用户。"
+          fi
           tg_add_footer msg
           # 全败走 alert 档：同轮内每个对象都另有 send_archive_alert（alert 档）单发，
           # 这条汇总量级最大、最能说明「本轮归档整体失败」，降级成普通档会让读者
