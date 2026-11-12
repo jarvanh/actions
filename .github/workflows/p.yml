@@ -44,11 +44,11 @@ jobs:
       #     else
       #       echo "No running workflows found. Continuing with the workflow execution."
       #     fi
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: rclone-install
         run: |
           set -e
-          # 安装 rclone：GitHub Releases 直下 .deb，失败回退 rclone.org 安装脚本
+          # 安装 rclone：GitHub Releases 直下 .deb，并用同 Release 的 SHA256SUMS 校验（取不到校验和即失败）
           bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
       - name: rclone-config
         env:
@@ -71,8 +71,7 @@ jobs:
         env:
           TUNNEL_NAME: "p" # cloudflared 隧道名
         run: |
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared-linux-amd64.deb
+          bash "$GITHUB_WORKSPACE/.github/scripts/cloudflared/install_cloudflared.sh"
           sudo mkdir -p ~/.cloudflared/
           sudo chown -R runner:runner ~/.cloudflared
           # rclone 以 runner 身份运行：root 运行会在 token 刷新时回写 rclone.conf 属主
@@ -167,7 +166,11 @@ jobs:
           echo "VW_DB_MD5_PULL=$db_md5" >> "$GITHUB_ENV"
           ls -la "$VW_DIR" "$VW_DIR/bitwarden-data"
       - name: Run vaultwarden container
-        run: ${{ secrets.VAULTWARDEN }}
+        # secret 只经 env 注入（不再内插进 run: 模板），由脚本按 argv 解析执行，
+        # 见 .github/scripts/services/run_vaultwarden.sh 的安全说明。
+        env:
+          VAULTWARDEN_RUN: ${{ secrets.VAULTWARDEN }}
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/services/run_vaultwarden.sh"
       - name: Verify container is running
         run: docker ps    
       - name: run cloudflared

@@ -17,11 +17,11 @@ jobs:
     concurrency: openlist-singleton
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: rclone-install
         run: |
           set -e
-          # 安装 rclone：GitHub Releases 直下 .deb，失败回退 rclone.org 安装脚本
+          # 安装 rclone：GitHub Releases 直下 .deb，并用同 Release 的 SHA256SUMS 校验（取不到校验和即失败）
           bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
       - name: rclone-config
         env:
@@ -71,6 +71,7 @@ jobs:
           rclone lsf dropbox:
       - name: Run openlist container
         run: |
+          set -o pipefail
           # ===== 数据库本地化（与 openlist 工作流同模式）=====
           # SQLite 不能跑在 rclone FUSE 挂载上 → 启动拉取本地、结束回传
           # （见末尾 "Persist" step；撕裂快照源头 -wal/-shm/-journal 拉取时排除）
@@ -78,8 +79,21 @@ jobs:
           sudo chmod 0777 /opt/openlist-data
           rclone copy dropbox:self-hosted/openlist/data /opt/openlist-data \
             --exclude "data.db-wal" --exclude "data.db-shm" --exclude "data.db-journal"
-          OPENLIST_DB_MD5_PULL=$(md5sum /opt/openlist-data/data.db 2>/dev/null | awk '{print $1}' || echo "none")
+          # 显式接收 md5sum 的退出码：管道里 awk 恒返回 0，原写法
+          # `md5sum ... | awk ... || echo none` 会把「文件缺失/读失败」吞成空串，
+          # 后续回传步骤拿空串当有效指纹 → 用空目录 sync 覆盖远端。
+          OPENLIST_DB_MD5_PULL=""
+          if ! _md5_out="$(md5sum /opt/openlist-data/data.db 2>/dev/null)"; then
+            echo "::error::拉取后 data.db 缺失或无法读取，终止本轮（避免空库启动/空目录回传）"
+            exit 1
+          fi
+          OPENLIST_DB_MD5_PULL="${_md5_out%% *}"
+          if [ -z "$OPENLIST_DB_MD5_PULL" ]; then
+            echo "::error::data.db 校验和为空，终止本轮（避免后续 destructive sync）"
+            exit 1
+          fi
           echo "OPENLIST_DB_MD5_PULL=$OPENLIST_DB_MD5_PULL" >> "$GITHUB_ENV"
+          touch /tmp/OL_DB_PULLED
           docker run -d --restart=unless-stopped -v /opt/openlist-data:/opt/openlist/data -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 --name="openlist" openlistteam/openlist:beta
           sleep 1m
           docker ps
@@ -151,13 +165,37 @@ jobs:
       - name: "Persist: openlist 数据库回传"
         if: ${{ always() }}
         run: |
+          set -uo pipefail
           sudo fusermount -uz /openlist 2>/dev/null || true
           docker stop openlist 2>/dev/null || true
-          CUR_MD5=$(md5sum /opt/openlist-data/data.db 2>/dev/null | awk '{print $1}' || echo "none")
-          if [ "$CUR_MD5" = "${OPENLIST_DB_MD5_PULL:-none}" ]; then
+          # 拉取步骤未成功完成时绝不回传：此时 /opt/openlist-data 可能是空目录，
+          # rclone sync 会把云端数据库整目录清空（destructive sync）。
+          if [ ! -f /tmp/OL_DB_PULLED ]; then
+            echo "::warning::数据库未成功拉取（/tmp/OL_DB_PULLED 不存在），跳过回传以保全远端"
+            exit 0
+          fi
+          # 显式接收 md5sum 退出码，失败/空结果直接 fail，绝不 continue 到 sync。
+          CUR_MD5=""
+          _md5_rc=0
+          _md5_out="$(md5sum /opt/openlist-data/data.db 2>/dev/null)" || _md5_rc=$?
+          if [ "$_md5_rc" -ne 0 ] || [ -z "$_md5_out" ]; then
+            echo "::error::回传前 data.db 缺失或 md5sum 失败（rc=${_md5_rc}），拒绝回传" >&2
+            exit 1
+          fi
+          CUR_MD5="${_md5_out%% *}"
+          if [ -z "${OPENLIST_DB_MD5_PULL:-}" ]; then
+            echo "::error::拉取时未记录有效 db 校验和，拒绝回传（无法证明源端完整）" >&2
+            exit 1
+          fi
+          # 源目录非空校验：sync 是 destructive，源为空/缺目录时必须停。
+          if [ ! -d /opt/openlist-data ] || [ -z "$(ls -A /opt/openlist-data 2>/dev/null)" ]; then
+            echo "::error::回传源目录 /opt/openlist-data 为空或不存在，拒绝 rclone sync" >&2
+            exit 1
+          fi
+          if [ "$CUR_MD5" = "$OPENLIST_DB_MD5_PULL" ]; then
             echo "db 未变化（${CUR_MD5}），跳过回传"
           else
-            echo "db 已变化（${OPENLIST_DB_MD5_PULL:-none} → ${CUR_MD5}），sync 回传..."
+            echo "db 已变化（${OPENLIST_DB_MD5_PULL} → ${CUR_MD5}），sync 回传..."
             rclone sync /opt/openlist-data dropbox:self-hosted/openlist/data \
               --exclude "data.db-wal" --exclude "data.db-shm" --exclude "data.db-journal"
             rclone delete dropbox:self-hosted/openlist/data \

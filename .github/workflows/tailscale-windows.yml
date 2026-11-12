@@ -39,8 +39,7 @@ jobs:
       TS_OAUTH_CLIENT_SECRET: ${{ secrets.TS_OAUTH_CLIENT_SECRET }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
-
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       # 记录 job 起点：Windows 没有 /proc/1，run_elapsed_seconds 拿不到"本轮跑了多久"，
       # 会退化成 0 → 接力步骤把跑满的轮报成"运行 0 分钟"，且人工取消判定会误命中
       # （0 < 21000）导致取消后永不接力。写这个标记供降级链第 ③ 档读取。

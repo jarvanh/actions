@@ -58,11 +58,13 @@ qoder_notify() {
       # ts.env 由 Tailscale 步骤在本 step 之前写出；缺失时两行整体跳过。
       if [ -n "${TS_FQDN:-}" ]; then
         tg_add_path _msg "看板" "https://${TS_FQDN}:8447/"
-        local _qp="$(cat "$QODER_DATA/.panel-password" 2>/dev/null || true)"
-        tg_add_path _msg "看板密码" "${_qp:-未取到}"
+        # 安全整改（ACT8）：面板密码/API Key 属凭据，绝不进 Telegram 消息
+        # （消息会留在聊天记录、通知转发与 bot 侧存储中，等同明文外泄）。
+        # 固定 REDACTED，需要真值时从数据目录读取（.panel-password / settings.json）。
+        tg_add_path _msg "看板密码" "REDACTED（见数据目录 .panel-password）"
       fi
-      # 明文 API Key（对齐 wb/trae 展示口径）
-      tg_add_path _msg "API Key" "$(read_qoder_key | grep . || echo 未取到)"
+      # API Key 同样只显示 REDACTED（凭据不回显，见上方注释）
+      tg_add_path _msg "API Key" "REDACTED（见 accounts/settings.json）"
       # 资产段（签到汇总）：路线 B —— 口径真源在看板（2026-11-01）。
       _qd_assets="$(python3 /dropbox/self-hosted/quota-board/board.py assets qoder 2>/dev/null || true)"
       [ -n "$_qd_assets" ] && tg_append _msg "$_qd_assets"
@@ -105,6 +107,9 @@ if [ ! -s "$QODER_DATA/accounts/settings.json" ]; then
   printf '%s\n' "$QODER_PANEL_PW" > "$QODER_DATA/.panel-password"
   echo "   凭据已生成（launcher Key qd-… + 面板密码 → .panel-password）"
 fi
+# 0600：面板密码明文文件只允许属主读取。挂载点（Dropbox FUSE）会合成 666/644，
+# chmod 可能无效，故忽略其失败；本地盘则实际收紧权限。每轮都执行以纠正历史 666。
+chmod 600 "$QODER_DATA/.panel-password" 2>/dev/null || true
 
 echo "2. Pull image & start container..."
 # 拉取失败不硬退：沿用本地旧镜像先保住服务可用性（digest 仍如实入账；

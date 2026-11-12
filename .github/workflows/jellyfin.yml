@@ -44,11 +44,11 @@ jobs:
           else
             echo "No running workflows found. Continuing with the workflow execution."
           fi
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: rclone-install
         run: |
           set -e
-          # 安装 rclone：GitHub Releases 直下 .deb，失败回退 rclone.org 安装脚本
+          # 安装 rclone：GitHub Releases 直下 .deb，并用同 Release 的 SHA256SUMS 校验（取不到校验和即失败）
           bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
       - name: rclone-config
         env:
@@ -177,14 +177,21 @@ jobs:
 
       - name: install jellyfin
         run: |
-          curl https://repo.jellyfin.org/install-debuntu.sh | sudo bash
+          # 先下载官方安装脚本到临时文件并校验 SHA256，再执行（原 curl | sudo bash
+          # 为未校验远端脚本直接以 root 运行）。上游脚本更新会使校验失败，
+          # 审阅后更新 .github/scripts/checksums/jellyfin-install-debuntu.sh.sha256。
+          bash "$GITHUB_WORKSPACE/.github/scripts/lib/fetch_verify.sh" \
+            https://repo.jellyfin.org/install-debuntu.sh \
+            "$GITHUB_WORKSPACE/.github/scripts/checksums/jellyfin-install-debuntu.sh.sha256" \
+            jellyfin-install-debuntu.sh /tmp/jellyfin-install-debuntu.sh
+          sudo bash /tmp/jellyfin-install-debuntu.sh
+          rm -f /tmp/jellyfin-install-debuntu.sh
       - name: run jellyfin
         run: |
           sudo nohup /usr/bin/jellyfin -w /usr/share/jellyfin/web --datadir /opt/jellyfin &
       - name: run cloudflared
         run: |
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared-linux-amd64.deb
+          bash "$GITHUB_WORKSPACE/.github/scripts/cloudflared/install_cloudflared.sh"
           sudo mkdir -p ~/.cloudflared/
           sudo chown -R runner:runner ~/.cloudflared
           # rclone 以 runner 身份运行（与挂载步骤同）：root 运行会在 token 刷新时回写 rclone.conf 属主

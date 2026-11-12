@@ -348,8 +348,7 @@ jobs:
     steps:
       # 检出仓库，使 .github/scripts/openlist/ 下的脚本文件可用
       - name: Checkout repository
-        uses: actions/checkout@v7
-
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       # 记录 job 起始时刻（2026-11-06 加）: GitHub 的 6h 硬顶是 **job 级**，
       # 从 job 开始算；而同步预算此前从「同步 step 开始」起算，把前置步骤
       # （rclone 安装/OpenList 容器/cloudflared 隧道）的耗时算漏了。
@@ -363,7 +362,7 @@ jobs:
       - name: rclone-install
         run: |
           set -e
-          # 安装 rclone：GitHub Releases 直下 .deb，失败回退 rclone.org 安装脚本
+          # 安装 rclone：GitHub Releases 直下 .deb，并用同 Release 的 SHA256SUMS 校验（取不到校验和即失败）
           bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
       - name: rclone-config
         env:
@@ -451,29 +450,16 @@ jobs:
           rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared
           # 下载加固（2026-11-08，run 42444338186 实证）: 原 `wget -q <latest 直链>`
           # 静默网络失败（wget rc=4），step 直接 exit 4，同步 step 被 skip、整轮
-          # 零产出（且 pending 接棒轮跟着空转一轮）。三重加固:
-          #   ① --tries 3 --timeout 30 重试瞬时抖动；
-          #   ② 下载到临时文件并校验非空后才 dpkg，绝不拿残留旧包安装；
-          #   ③ 全部失败且系统已有 cloudflared（runner 镜像预装）→ 告警放行；
-          #     都没有才真失败。
-          _cf_deb="/tmp/cloudflared-linux-amd64.deb"
-          _dl_ok=0
-          for _i in 1 2 3; do
-            if wget --tries=1 --timeout=30 -O "$_cf_deb" \
-                 https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb \
-                 2>&1 | grep -avE '^save|K\.\.\.|K%' ; then
-              if [ -s "$_cf_deb" ]; then _dl_ok=1; break; fi
+          # 零产出（且 pending 接棒轮跟着空转一轮）。现统一走仓库内固定版本 +
+          # SHA256 校验的安装脚本（ACT9a）：校验失败/下载失败都拒绝安装；
+          # 仅当系统已有预装 cloudflared 时告警放行（不执行未校验的新下载物）。
+          if ! bash "$GITHUB_WORKSPACE/.github/scripts/cloudflared/install_cloudflared.sh"; then
+            if command -v cloudflared >/dev/null 2>&1; then
+              echo "::warning::cloudflared 校验安装失败，但系统已预装 cloudflared（$(cloudflared --version 2>/dev/null || echo unknown)），继续用预装版本"
+            else
+              echo "::error::cloudflared 校验安装失败且系统无预装 cloudflared"
+              exit 1
             fi
-            echo "wget 第 $_i/3 次失败，10s 后重试..."
-            sleep 10
-          done
-          if [ "$_dl_ok" = "1" ]; then
-            sudo dpkg -i "$_cf_deb"
-          elif command -v cloudflared >/dev/null 2>&1; then
-            echo "::warning::cloudflared deb 下载 3 次均失败，但系统已预装 cloudflared（$(cloudflared --version 2>/dev/null || echo unknown)），继续用预装版本"
-          else
-            echo "::error::cloudflared deb 下载 3 次均失败且系统无预装 cloudflared"
-            exit 1
           fi
 
       # 隧道状态守卫:

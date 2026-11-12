@@ -41,8 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: rclone-install
         run: |
           set -e
@@ -134,7 +133,7 @@ jobs:
           echo "[源端 stderr]";   head -3 /tmp/dbg/src.err
 
       - name: 上传清单 artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: openlist-debug-listing
           path: /tmp/dbg/

@@ -109,8 +109,7 @@ jobs:
       TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
-
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: rclone-install
         run: |
           set -e
@@ -235,7 +234,7 @@ jobs:
         # 报告已全量打印进 run 日志，artifact 只是方便取用；该 action 不可用时
         # 不该把整次预演判失败
         continue-on-error: true
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ol-restore-tryrun-report
           path: |

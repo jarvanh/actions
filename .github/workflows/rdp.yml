@@ -1,7 +1,15 @@
 name: RDP
 
 on:
+  # 默认关闭：只允许手动触发，且必须显式勾选 enable_rdp。
+  # 该工作流会把 3389 经 ngrok 暴露到公网，禁止任何定时/事件自动拉起。
   workflow_dispatch:
+    inputs:
+      enable_rdp:
+        description: "确认开启公网 RDP（ngrok tcp 3389，约 6 小时）。仅在确有需要时勾选。"
+        required: true
+        type: boolean
+        default: false
   # schedule:
   #   - cron: '30 16 * * *'
   # watch:
@@ -9,6 +17,8 @@ on:
 
 jobs:
   rdp:
+    # 二次开关：未显式确认则整个 job 不运行（默认公网暴露 = 关闭）
+    if: ${{ inputs.enable_rdp == true }}
     runs-on: windows-latest
     # GitHub 托管 runner 单任务上限 360 分钟（6 小时）
     timeout-minutes: 360
@@ -19,8 +29,7 @@ jobs:
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v7
-
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
     - name: Download ngrok
       run: Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
 
@@ -37,6 +46,27 @@ jobs:
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
         Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
+
+    - name: Validate strong RDP password
+      # 强认证闸：公网 3389 只靠密码，弱口令等于把 runner 交给扫描器。
+      # 至少 16 位且覆盖大小写/数字/符号中的 3 类，否则拒绝开启隧道。
+      shell: pwsh
+      env:
+        RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+      run: |
+        $pw = $Env:RDP_PASSWORD
+        if ([string]::IsNullOrEmpty($pw) -or $pw.Length -lt 16) {
+          throw "RDP_PASSWORD 未配置或长度 < 16，拒绝开启公网 RDP"
+        }
+        $classes = 0
+        if ($pw -cmatch '[a-z]') { $classes++ }
+        if ($pw -cmatch '[A-Z]') { $classes++ }
+        if ($pw -match '[0-9]') { $classes++ }
+        if ($pw -match '[^A-Za-z0-9]') { $classes++ }
+        if ($classes -lt 3) {
+          throw "RDP_PASSWORD 复杂度不足（需覆盖大小写/数字/符号中至少 3 类），拒绝开启公网 RDP"
+        }
+        Write-Host "RDP 密码强度校验通过（长度 $($pw.Length)，字符类别 $classes/4）"
 
     - name: Set password
       run: Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText $Env:RDP_PASSWORD -Force)

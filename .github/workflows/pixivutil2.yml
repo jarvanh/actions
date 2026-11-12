@@ -16,12 +16,12 @@ jobs:
     # 并在真实 26.04 runner 上验证四类挂载点全部通过（run 42730947602），用回 ubuntu-latest。
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: rclone-install
         id: rclone-install
         run: |
           set -e
-          # 安装 rclone：GitHub Releases 直下 .deb，失败回退 rclone.org 安装脚本
+          # 安装 rclone：GitHub Releases 直下 .deb，并用同 Release 的 SHA256SUMS 校验（取不到校验和即失败）
           bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
       - name: rclone-config
         id: rclone-config

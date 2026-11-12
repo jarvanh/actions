@@ -99,8 +99,7 @@ jobs:
       # .github/scripts/handoff/guard.sh 为入口，而 runner 初始 workspace 是空的。
       # 排在后面时 guard 会以 127 失败，并因无 always() 把 checkout 连同整条链跳过
       #（run 42738639200 / 42748258649 实测）。
-      - uses: actions/checkout@v7
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Handoff guard (cron 兜底让位检查)
         # 2026-11-10 Phase 1：并发单例改为动态组后的第一道防双服闸。
         # 触发场景 = 旧轮 job 已结束、继任者已在 serving，组里排队的 cron 轮拿到
@@ -132,7 +131,7 @@ jobs:
           echo "✅ 最新稳定版 Node: $V"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           # 上一步骤解析的最新稳定版；'26' 仅为表达式空值兜底
           node-version: ${{ env.NODE_STABLE || '26' }}
@@ -198,7 +197,7 @@ jobs:
           # 显示 01:30:23 而实际死线是 01:24:23（差 6 分钟）。
           # 公式唯一实现在 handoff/deadline.sh，起点与死线同刻落盘。
           bash "$GITHUB_WORKSPACE/.github/scripts/handoff/deadline.sh" >/dev/null 2>&1 || true
-          # 安装 rclone：GitHub Releases 直下 .deb，失败回退 rclone.org 安装脚本
+          # 安装 rclone：GitHub Releases 直下 .deb，并用同 Release 的 SHA256SUMS 校验（取不到校验和即失败）
           bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
       - name: rclone-config
         env:
@@ -578,7 +577,7 @@ jobs:
           fi
           rm -f /tmp/openclaw-cli-install.rc /tmp/install-openclaw.rc /tmp/install-openclaw-step.log
           (
-            ( curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard; \
+            ( bash "$GITHUB_WORKSPACE/.github/scripts/openclaw/install-openclaw-cli.sh" --no-onboard; \
               echo $? > /tmp/openclaw-cli-install.rc ) > /tmp/openclaw-cli-install.log 2>&1 &
             export OC_CLI_INSTALL_PID=$! INST_T0=$(date +%s)
             bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/install-openclaw.sh"
@@ -909,7 +908,7 @@ jobs:
         # gpg 对称加密（passphrase 在 Secrets.TS_CERT_GPG_KEY，fork PR 与
         # 缓存本身都拿不到明文私钥）。无 secret/无缓存时优雅降级为本轮现签。
         if: ${{ always() }}
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/ts-cert-cache
           # 精确 key 永不命中（证书到期日只有签发后才知道），靠 restore-keys
@@ -1172,7 +1171,7 @@ jobs:
 
       - name: Save Tailscale certs cache
         if: ${{ always() && inputs.handoff_of == '' && steps.ts_certs_stash.outputs.saved == 'true' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/ts-cert-cache
           key: ${{ steps.ts_certs_stash.outputs.key }}
@@ -1349,7 +1348,7 @@ jobs:
           # 2026-10-30 外置适配：脚本与 installer 子壳是兄弟进程，wait 拿不到 ——
           # installer 退出码落 rc 文件，脚本侧轮询 rc 等价收口（1800s 上限兜底）。
           rm -f /tmp/openclaw-cli-install.rc
-          ( curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard; \
+          ( bash "$GITHUB_WORKSPACE/.github/scripts/openclaw/install-openclaw-cli.sh" --no-onboard; \
             echo $? > /tmp/openclaw-cli-install.rc ) > /tmp/openclaw-cli-install.log 2>&1 &
           export OC_CLI_INSTALL_PID=$! INST_T0
           bash -eo pipefail "$GITHUB_WORKSPACE/.github/scripts/openclaw/install-openclaw.sh"
@@ -1473,8 +1472,7 @@ jobs:
         if: ${{ !cancelled() }}
         continue-on-error: true
         run: |
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared-linux-amd64.deb
+          bash "$GITHUB_WORKSPACE/.github/scripts/cloudflared/install_cloudflared.sh"
           sudo mkdir -p ~/.cloudflared/
           # 2026-11-10 1033 事故：/dropbox 挂载失败时这里静默复制 0 个文件，隧道随后
           # 无限重启（Cannot determine default origin certificate path），远端只看到

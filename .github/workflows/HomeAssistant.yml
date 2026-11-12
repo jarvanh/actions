@@ -32,11 +32,11 @@ jobs:
       # -----------------------------------------------------------
       # 1. 配置 Rclone 并把 HA 配置拉到本地（不再挂载 FUSE，见下方说明）
       # -----------------------------------------------------------
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: rclone-install
         run: |
           set -e
-          # 安装 rclone：GitHub Releases 直下 .deb，失败回退 rclone.org 安装脚本
+          # 安装 rclone：GitHub Releases 直下 .deb，并用同 Release 的 SHA256SUMS 校验（取不到校验和即失败）
           bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
       - name: rclone-config
         env:
@@ -107,8 +107,7 @@ jobs:
           # rclone 同样以 runner 身份运行：root 运行会在 token 刷新时回写 rclone.conf 属主
           rclone copy dropbox:self-hosted/.cloudflared ~/.cloudflared -vv
           
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared-linux-amd64.deb
+          bash "$GITHUB_WORKSPACE/.github/scripts/cloudflared/install_cloudflared.sh"
 
       - name: Check if tunnel is running
         env:
@@ -166,8 +165,15 @@ jobs:
           else
             echo "🚀 HACS not found. Installing..."
             
-            # 进入容器下载并运行 HACS 安装脚本
-            docker exec homeassistant bash -c "wget -O - https://get.hacs.xyz | bash"
+            # 进入容器执行 HACS 安装脚本：先下载到宿主临时文件并校验 SHA256，
+            # 再 docker cp 进容器执行（原 `wget -O - ... | bash` 为未校验远端脚本）。
+            bash "$GITHUB_WORKSPACE/.github/scripts/lib/fetch_verify.sh" \
+              https://get.hacs.xyz \
+              "$GITHUB_WORKSPACE/.github/scripts/checksums/hacs-install.sh.sha256" \
+              hacs-install.sh /tmp/hacs-install.sh
+            docker cp /tmp/hacs-install.sh homeassistant:/tmp/hacs-install.sh
+            docker exec homeassistant bash /tmp/hacs-install.sh
+            rm -f /tmp/hacs-install.sh
             
             echo "HACS installed. Restarting Home Assistant to apply changes..."
             docker restart homeassistant

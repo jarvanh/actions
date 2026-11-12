@@ -330,9 +330,18 @@ echo "--- 场景8: 落盘链路三点连通（序列化 ↔ 真实落点 ↔ 还
 SIZE7=$(wc -c < "$SRC7" | tr -d ' ')
 SEP7=$'\037'
 FIXLINE7="${ORIG7}${SEP7}${TRY_FIX_ALTERNATIVE}${SEP7}${TRY_FIX_METHOD}${SEP7}${TRY_FIX_RESTORE}${SEP7}${SIZE7}B${SEP7}${SIZE7}${SEP7}${TRY_FIX_METHOD_ID}${SEP7}${TRY_FIX_MD5}"
-FIXED_JSON7=$(printf '%s\n' "$FIXLINE7" \
+FIXED_JSON7=""
+# 显式接收序列化退出码：此前 `jq ... || echo "[]"` 会把 jq 解析失败吞成空数组，
+# 随后 8a-8f 只在「空数组」上断言（历史上一度因此整套恒红/或被误判为环境问题）。
+# 现在 rc 非 0 或输出为空都直接记 FAIL 并留痕，不再用兜底值掩盖真实错误。
+_SER_RC=0
+FIXED_JSON7="$(printf '%s\n' "$FIXLINE7" \
   | jq -R -s --arg sp "$SRC7_BASE" --arg dp "$DEST" \
-      -f "$REPO_ROOT/.github/scripts/openlist/restore_info.jq" 2>/dev/null || echo "[]")
+      -f "$REPO_ROOT/.github/scripts/openlist/restore_info.jq" 2>/dev/null)" || _SER_RC=$?
+if [ "$_SER_RC" -ne 0 ] || [ -z "$FIXED_JSON7" ]; then
+  bad "8-0 restore_info.jq 序列化失败（rc=${_SER_RC}，输出为空或非零），拒绝用空数组掩盖"
+  FIXED_JSON7="[]"
+fi
 # ② 序列化结果与修复侧输出一致（kind 正确、original/alternative 逐字一致）
 [ "$(echo "$FIXED_JSON7" | jq -r '.[0].restore.kind // "MISSING"')" = "hash_dir" ] \
   && ok "8a 序列化 kind=hash_dir（与折叠行为一致）" || bad "8a: kind=$(echo "$FIXED_JSON7" | jq -r '.[0].restore.kind // "MISSING"')"

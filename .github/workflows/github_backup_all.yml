@@ -13,11 +13,11 @@ jobs:
   backup:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: rclone-install
         run: |
           set -e
-          # 安装 rclone：GitHub Releases 直下 .deb，失败回退 rclone.org 安装脚本
+          # 安装 rclone：GitHub Releases 直下 .deb，并用同 Release 的 SHA256SUMS 校验（取不到校验和即失败）
           bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
       - name: rclone-config
         env:
@@ -31,9 +31,17 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT }}
         run: |
           set -euo pipefail
+          # 备份包含所有仓库的完整历史（含私有库），产物一律 0600，避免同机其他进程读取
+          umask 077
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "❌ PAT 未配置（secrets.PAT），无法枚举/克隆私有仓库" >&2
+            exit 1
+          fi
+          REPO_LIST="$(mktemp)"
           cleanup_backup_workdir() {
             rm -f github_repos_latest.tar.gz 2>/dev/null || true
             rm -rf github_backup_temp.tmp 2>/dev/null || true
+            rm -f "$REPO_LIST" 2>/dev/null || true
           }
           free_kb() { df -Pk "${1:-.}" | awk 'NR==2 {print $4}'; }
           require_free_kb() {
@@ -54,26 +62,72 @@ jobs:
           rm -rf "$BACKUP_DIR"
           mkdir -p "$BACKUP_DIR"
           
-          # 获取用户所有的仓库 (包括 private 和 public)
-          REPOS=$(curl -s -H "Authorization: token $GH_TOKEN" "https://api.github.com/user/repos?per_page=100&type=owner" | jq -r '.[].ssh_url')
-          
-          if [ -z "$REPOS" ]; then
+          # 获取用户所有的仓库 (包括 private 和 public)。必须全量分页：单页
+          # per_page=100 在第 101 个仓库起会静默漏备；按 Link/不足 100 条结束。
+          page=1
+          : > "$REPO_LIST"
+          while :; do
+            resp="$(curl -fsSL --retry 3 --retry-delay 5 --max-time 60 \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/user/repos?per_page=100&type=owner&page=${page}")"
+            count="$(printf '%s' "$resp" | jq 'if type == "array" then length else error("unexpected response") end')"
+            printf '%s' "$resp" | jq -r '.[].full_name' >> "$REPO_LIST"
+            [ "$count" -lt 100 ] && break
+            page=$((page + 1))
+            if [ "$page" -gt 100 ]; then
+              echo "❌ 仓库分页超过 100 页，疑似 API 异常，终止以避免半量备份" >&2
+              exit 1
+            fi
+          done
+          mapfile -t REPOS < <(sed '/^[[:space:]]*$/d' "$REPO_LIST" | sort -u)
+
+          if [ "${#REPOS[@]}" -eq 0 ]; then
             echo "未找到任何仓库，请检查 PAT 权限。"
             exit 1
           fi
-          
-          for REPO in $REPOS; do
-            REPO_NAME=$(basename $REPO .git)
+
+          # PAT 只经 credential helper（子进程环境变量）传给 git，绝不拼进 clone URL：
+          # URL 会落进 .git/config，随后被 tar 进 OneDrive 备份包（原实现即此泄露路径）。
+          GIT_ASKPASS=/bin/true
+          export GIT_ASKPASS
+          GIT_CONFIG_COUNT=1
+          GIT_CONFIG_KEY_0=credential.helper
+          # 单引号是刻意的：${GH_TOKEN} 必须由 git 调起的 helper 子壳展开，
+          # 不能在本 step 里展开（否则 token 会进 argv/日志）。
+          # shellcheck disable=SC2016,SC2089,SC2090
+          GIT_CONFIG_VALUE_0='!f() { echo username=x-access-token; echo "password=${GH_TOKEN}"; }; f'
+          # shellcheck disable=SC2090
+          export GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+          for REPO in "${REPOS[@]}"; do
+            REPO_NAME="${REPO##*/}"
             echo "----------------------------------------"
             echo "正在处理仓库: $REPO_NAME ..."
-            
-            CLONE_URL=$(echo $REPO | sed -e "s/git@github.com:/https:\/\/$GH_TOKEN@github.com\//")
-            
-            git clone --mirror "$CLONE_URL" "$BACKUP_DIR/$REPO_NAME.git" || {
+
+            DEST="$BACKUP_DIR/$REPO_NAME.git"
+            if ! GIT_TERMINAL_PROMPT=0 git clone --mirror "https://github.com/${REPO}.git" "$DEST"; then
               echo "❌ $REPO_NAME 备份失败（可能已被 GitHub 禁用或访问受限），跳过此仓库。"
-              rm -rf "$BACKUP_DIR/$REPO_NAME.git"
-            }
+              rm -rf "$DEST"
+              continue
+            fi
+            # 防御性清理：无论 clone 用何种认证方式，origin URL 必须是无凭据形式；
+            # 同时清掉可能被写入的认证辅助配置。
+            if ! git -C "$DEST" remote set-url origin "https://github.com/${REPO}.git"; then
+              echo "❌ $REPO_NAME 无法重置 origin URL，终止（防止凭据入包）" >&2
+              exit 1
+            fi
+            git -C "$DEST" config --unset-all http.extraheader 2>/dev/null || true
+            git -C "$DEST" config --unset-all credential.helper 2>/dev/null || true
           done
+
+          # 打包前凭据扫描：任何文本文件（含每个仓库的 .git/config）出现 PAT 即失败，
+          # 不把可能带凭据的包上传到云端。
+          if grep -rIlF -- "$GH_TOKEN" "$BACKUP_DIR" >/dev/null 2>&1; then
+            echo "❌ 备份目录中发现 PAT 明文（疑似落入 .git/config），拒绝打包上传" >&2
+            grep -rIlF -- "$GH_TOKEN" "$BACKUP_DIR" | sed 's/^/  - /' >&2 || true
+            exit 1
+          fi
           
           echo "----------------------------------------"
           echo "正在打包所有备份成功的仓库..."
@@ -86,6 +140,7 @@ jobs:
           require_free_kb "." $((src_kb + 1024 * 1024)) "github repos archive preflight"
           rm -f "$ARCHIVE_NAME"
           tar -czf "$ARCHIVE_NAME" "$BACKUP_DIR"
+          chmod 600 "$ARCHIVE_NAME"
           archive_bytes=$(stat -c%s "$ARCHIVE_NAME")
           if [ -z "${archive_bytes:-}" ] || [ "$archive_bytes" -le 0 ]; then
             echo "❌ github repos archive validation: archive is empty" >&2

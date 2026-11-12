@@ -2,8 +2,9 @@
 # rclone 一键引导：安装 + 配置 + 掩码 + 持久化（所有 workflow 统一调用）。
 #
 # 用法: setup_rclone.sh [install|config]
-#   install — 安装 rclone：GitHub Releases 直下最新稳定版 .deb（可用 RCLONE_VERSION
-#             覆盖）；版本号解析不到或下载失败，回退 rclone.org 安装脚本（同为最新稳定版）
+#   install — 安装 rclone：GitHub Releases 直下 .deb（可用 RCLONE_VERSION 覆盖），
+#             并用同 Release 的 SHA256SUMS 校验；版本号或校验和取不到即失败
+#             （不再回退执行 rclone.org 的远端安装脚本）
 #   config  — rclone.conf 引导与持久化：
 #       1. secret 起步：RCLONE_CONFIG（step env 注入，防文本注入被 bash 展开）写入本地 conf
 #       2. 掩码敏感值（::add-mask::）——每次 conf 变更后都重新掩一遍
@@ -179,34 +180,84 @@ resolve_latest_version() {
 }
 
 do_install() {
-  # 安装 rclone：GitHub Releases 直下 .deb，跟踪最新稳定版（RCLONE_VERSION 可覆盖）
+  # 安装 rclone：GitHub Releases 直下 .deb（跟踪最新稳定版，RCLONE_VERSION 可覆盖），
+  # 并用**同一 Release** 的 SHA256SUMS 校验后才 dpkg -i。
+  # 安全整改（ACT4）：原实现校验失败时回退 `curl https://rclone.org/install.sh | sudo bash`
+  # —— 远端脚本无版本、无校验直接以 root 执行。现改为 fail closed：取不到版本号或
+  # 校验和就报错退出，绝不执行未校验的远端脚本。
   local rver="${RCLONE_VERSION:-}"
   if [ -z "$rver" ]; then
     rver="$(resolve_latest_version || true)"
   fi
-
-  if [ -n "$rver" ]; then
-    echo "目标 rclone 版本: $rver"
-    if curl -fsSL --retry 2 --retry-delay 5 --connect-timeout 30 --max-time 300 \
-        -o /tmp/rclone.deb \
-        "https://github.com/rclone/rclone/releases/download/${rver}/rclone-${rver}-linux-amd64.deb"; then
-      sudo dpkg -i /tmp/rclone.deb
-      # 用 sed 而不是 head 取前两行: head 读满 2 行就关闭管道，rclone 随即收到
-      # SIGPIPE 以 141 退出；本脚本 set -euo pipefail，141 会一路冒成 install step
-      # 的失败，后面 18 个 step 全 skipped —— run 34685067684 就是 rclone v1.75.1
-      # 明明装好可用，step 却报 "Process completed with exit code 141"，整轮白跑。
-      # sed 会读完整个输入，不会提前关闭管道。
-      rclone version 2>&1 | sed -n '1,2p'
-      return 0
-    fi
-    echo "::warning::GitHub Releases 下载 ${rver} 失败，回退 rclone.org 安装脚本"
-  else
-    echo "::warning::无法解析 rclone 最新版本号，改用 rclone.org 安装脚本"
+  if [ -z "$rver" ]; then
+    echo "::error::无法解析 rclone 版本号（RCLONE_VERSION 未设置且 latest 解析失败），拒绝安装未校验版本" >&2
+    return 1
   fi
 
-  curl -fsSL https://rclone.org/install.sh | sudo bash
-  # 同 do_install 内的说明: 用 sed 取前两行，避免 head 提前关管道触发 SIGPIPE(141)
+  echo "目标 rclone 版本: $rver"
+  local deb="/tmp/rclone-${rver}-linux-amd64.deb"
+  local sums="/tmp/rclone-${rver}-SHA256SUMS"
+  local url_deb="https://github.com/rclone/rclone/releases/download/${rver}/rclone-${rver}-linux-amd64.deb"
+  local url_sums="https://github.com/rclone/rclone/releases/download/${rver}/SHA256SUMS"
+
+  # SHA256SUMS 与 .deb 同源同版本；任一取不到（重试 3 次后）都失败，不回退无校验安装。
+  local _try _ok=0
+  for _try in 1 2 3; do
+    if curl -fsSL --retry 2 --retry-delay 5 --connect-timeout 30 --max-time 120 \
+        -o "$sums" "$url_sums"; then
+      _ok=1
+      break
+    fi
+    echo "::warning::获取 rclone SHA256SUMS 失败（第 ${_try}/3 次）" >&2
+    [ "$_try" -lt 3 ] && sleep $((_try * 5))
+  done
+  if [ "$_ok" -ne 1 ] || [ ! -s "$sums" ]; then
+    echo "::error::无法获取 ${rver} 的 SHA256SUMS，拒绝安装未校验的 rclone" >&2
+    rm -f "$sums"
+    return 1
+  fi
+
+  local expect actual
+  expect="$(awk -v f="rclone-${rver}-linux-amd64.deb" '$2 == f {print $1}' "$sums" | head -n 1)"
+  if ! printf '%s' "$expect" | grep -Eq '^[0-9a-fA-F]{64}$'; then
+    echo "::error::SHA256SUMS 中未找到 rclone-${rver}-linux-amd64.deb 的有效校验值，拒绝安装" >&2
+    rm -f "$sums"
+    return 1
+  fi
+
+  _ok=0
+  for _try in 1 2 3; do
+    if curl -fsSL --retry 2 --retry-delay 5 --connect-timeout 30 --max-time 300 \
+        -o "$deb" "$url_deb"; then
+      _ok=1
+      break
+    fi
+    echo "::warning::下载 rclone .deb 失败（第 ${_try}/3 次）" >&2
+    [ "$_try" -lt 3 ] && sleep $((_try * 5))
+  done
+  if [ "$_ok" -ne 1 ] || [ ! -s "$deb" ]; then
+    echo "::error::下载 rclone ${rver} .deb 失败，终止（不回退未校验安装脚本）" >&2
+    rm -f "$deb" "$sums"
+    return 1
+  fi
+
+  actual="$(sha256sum "$deb" | awk '{print $1}')"
+  if [ "$actual" != "$expect" ]; then
+    echo "::error::rclone .deb SHA256 校验失败（期望 ${expect}，实际 ${actual}），拒绝安装" >&2
+    rm -f "$deb" "$sums"
+    return 1
+  fi
+  echo "✅ rclone .deb SHA256 校验通过（${actual}）"
+
+  sudo dpkg -i "$deb"
+  # 用 sed 而不是 head 取前两行: head 读满 2 行就关闭管道，rclone 随即收到
+  # SIGPIPE 以 141 退出；本脚本 set -euo pipefail，141 会一路冒成 install step
+  # 的失败，后面 18 个 step 全 skipped —— run 34685067684 就是 rclone v1.75.1
+  # 明明装好可用，step 却报 "Process completed with exit code 141"，整轮白跑。
+  # sed 会读完整个输入，不会提前关闭管道。
   rclone version 2>&1 | sed -n '1,2p'
+  rm -f "$deb" "$sums"
+  return 0
 }
 
 do_config() {

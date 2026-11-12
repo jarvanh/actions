@@ -37,7 +37,11 @@
     WB_DIR="/dropbox/self-hosted/workbuddy-gateway"
     WB_BIN_DIR="/tmp/local_workbuddy"
     WB_BIN="$WB_BIN_DIR/workbuddy-gateway"
-    WB_RELEASE_BASE="https://github.com/jarvanh/workbuddy-gateway/releases/latest/download"
+    # 版本固定优先：WB_VERSION 显式给出时只部署该版本（可复现、可审计）；
+    # 未给出时仍跟随最新 release，但**必须**拿到同版本 checksums.txt 并校验通过，
+    # 否则拒绝安装/执行（与 trae2api 的「取不到 SHA256 就拒绝构建」同强度）。
+    WB_RELEASE_REPO="https://github.com/jarvanh/workbuddy-gateway"
+    WB_PIN_VERSION="${WB_VERSION:-}"
     WB_VER_FILE="$WB_DIR/.installed-version"
     WB_META="/tmp/run-workbuddy-meta.env"
     WB_LOG="$WB_DIR/logs/serve.log"
@@ -288,6 +292,10 @@
         | sed -n 's#.*/releases/tag/##p' | head -n 1 || true)"
       [ -n "$WB_REMOTE_VER" ] && echo "✅ 重定向兜底取到版本：${WB_REMOTE_VER}"
     fi
+    if [ -n "$WB_PIN_VERSION" ]; then
+      WB_REMOTE_VER="$WB_PIN_VERSION"
+      echo "📌 WB_VERSION=${WB_PIN_VERSION} 已固定目标版本（跳过 latest 解析）"
+    fi
     WB_LOCAL_VER="$(head -n 1 "$WB_VER_FILE" 2>/dev/null || true)"
 
     # WB_STATE = 部署结论（是否发生了更新），WB_REASON = 只在异常/降级时给的原因，
@@ -303,41 +311,57 @@
     else
       if [ -n "$WB_REMOTE_VER" ]; then
         echo "⬇️ 发现新版本 ${WB_REMOTE_VER}（本地 ${WB_LOCAL_VER:-未安装}），开始下载..."
-      else
-        echo "⚠️ 无法读取 release 版本（GitHub API 不可达或限流），按当前可用版本部署"
-      fi
-      # 下载到本地盘的临时文件再原子替换：中途失败不会留下半个二进制
-      WB_TMP_BIN="$WB_BIN_DIR/.workbuddy-gateway.new"
-      if curl -fsSL --max-time 300 -o "$WB_TMP_BIN" "$WB_RELEASE_BASE/workbuddy-gateway-linux-amd64"; then
-        chmod 755 "$WB_TMP_BIN"
-        if [ -s "$WB_TMP_BIN" ]; then
+        # 下载到本地盘的临时文件再原子替换：中途失败不会留下半个二进制
+        WB_TMP_BIN="$WB_BIN_DIR/.workbuddy-gateway.new"
+        WB_REL_BASE="${WB_RELEASE_REPO}/releases/download/${WB_REMOTE_VER}"
+        rm -f "$WB_TMP_BIN" 2>/dev/null || true
+        # ① 校验和必须来自**同版本** Release；取不到即拒绝下载/执行。
+        WB_SUMS="$(curl -fsSL --max-time 60 "${WB_REL_BASE}/checksums.txt" 2>/dev/null || true)"
+        WB_EXPECT_SHA="$(printf '%s\n' "$WB_SUMS" \
+          | awk '$2 == "workbuddy-gateway-linux-amd64" {print $1}' | head -n 1 || true)"
+        if [ -z "$WB_EXPECT_SHA" ]; then
+          WB_STATE="校验失败"
+          WB_REASON="未取到 ${WB_REMOTE_VER} 的 checksums.txt（拒绝安装未校验二进制）"
+          echo "❌ ${WB_REMOTE_VER} 缺少可用的 SHA256 校验和，拒绝下载/执行" >&2
+        elif ! curl -fsSL --max-time 300 -o "$WB_TMP_BIN" "${WB_REL_BASE}/workbuddy-gateway-linux-amd64"; then
+          rm -f "$WB_TMP_BIN" 2>/dev/null || true
+          WB_STATE="下载失败"
+          WB_REASON="GitHub Releases 下载失败"
+        elif [ ! -s "$WB_TMP_BIN" ]; then
+          WB_STATE="下载失败"
+          WB_REASON="下载产物为空"
+        elif ! printf '%s  %s\n' "$WB_EXPECT_SHA" "$WB_TMP_BIN" | sha256sum -c - >/dev/null 2>&1; then
+          rm -f "$WB_TMP_BIN" 2>/dev/null || true
+          WB_STATE="校验失败"
+          WB_REASON="SHA256 校验不通过（期望 ${WB_EXPECT_SHA}）"
+          echo "❌ workbuddy-gateway SHA256 校验失败，拒绝安装" >&2
+        else
+          chmod 755 "$WB_TMP_BIN"
           mv -f "$WB_TMP_BIN" "$WB_BIN"
           # mv 保留源文件模式；上面的 chmod 755 只作用于 .new 临时文件。
           # 这里对最终路径再补一次，防「临时文件权限被外部改回」等异常路径。
           chmod +x "$WB_BIN" 2>/dev/null || true
-          if [ -n "$WB_REMOTE_VER" ]; then
-            printf '%s\n' "$WB_REMOTE_VER" > "$WB_VER_FILE"
-            if [ -n "$WB_LOCAL_VER" ]; then
-              WB_STATE="已更新"
-              WB_UPDATE="从 ${WB_LOCAL_VER} 更新到 ${WB_REMOTE_VER}"
-            else
-              WB_STATE="已安装"
-              WB_UPDATE="首次安装 ${WB_REMOTE_VER}"
-            fi
+          printf '%s\n' "$WB_REMOTE_VER" > "$WB_VER_FILE"
+          if [ -n "$WB_LOCAL_VER" ]; then
+            WB_STATE="已更新"
+            WB_UPDATE="从 ${WB_LOCAL_VER} 更新到 ${WB_REMOTE_VER}（SHA256 已校验）"
           else
-            WB_STATE="已就绪"
-            WB_REASON="版本号查询失败（GitHub API 不可达或限流），以现有二进制运行"
+            WB_STATE="已安装"
+            WB_UPDATE="首次安装 ${WB_REMOTE_VER}（SHA256 已校验）"
           fi
-        else
-          WB_STATE="下载失败"
-          WB_REASON="下载产物为空"
         fi
-      else
         rm -f "$WB_TMP_BIN" 2>/dev/null || true
+      elif [ -x "$WB_BIN" ]; then
+        # 版本号查询失败但本地已有可执行二进制（上一轮校验过的产物）：沿用即可，
+        # 不下载任何未校验内容。
+        WB_STATE="已就绪"
+        WB_REASON="版本号查询失败（GitHub API 不可达或限流），沿用已安装的二进制"
+        echo "⚠️ 无法读取 release 版本，沿用本地已安装二进制"
+      else
         WB_STATE="下载失败"
-        WB_REASON="GitHub Releases 下载失败"
+        WB_REASON="无法解析 release 版本且本地无可用二进制（拒绝执行未校验产物）"
+        echo "❌ 无版本号且本地无二进制：无法取得 SHA256 校验和，拒绝安装" >&2
       fi
-      rm -f "$WB_TMP_BIN" 2>/dev/null || true
     fi
 
     WB_VER="$(head -n 1 "$WB_VER_FILE" 2>/dev/null || true)"
@@ -375,7 +399,11 @@
       echo "🔧 二进制缺可执行位，已补回：$WB_BIN"
     fi
     if [ ! -x "$WB_BIN" ]; then
-      echo "❌ 二进制不可执行：$WB_BIN（下载失败或权限位丢失）"
+      echo "❌ 二进制不可执行：$WB_BIN（下载失败、校验失败或权限位丢失）" >&2
+      # 不调用 services.sh ensure：宁可本轮降级，也不执行来源未校验的产物。
+      wb_notify "❌ workbuddy-gateway 启动失败" "二进制缺失或校验失败" \
+        "${WB_VER:-}" "${WB_UPDATE:-}" "${WB_REASON:-无法取得可校验的 release 产物}" "" 0
+      exit 1
     fi
     # serve 的工作目录是 Dropbox（WB_DIR，2026-10-06 起数据直写：凭据/状态/缓存/logs 都落这里），
     # 二进制在本地盘 WB_BIN_DIR；unit 真源 services.sh（WorkingDirectory=WB_DIR）。

@@ -91,14 +91,14 @@ jobs:
           echo "✅ yshop-drink is available at $HOME/yshop-drink"
 
       - name: Setup Java and Node
-        uses: actions/setup-java@v6
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
         with:
           distribution: temurin
           java-version: "17"
           cache: maven
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "20"
 
@@ -106,6 +106,9 @@ jobs:
         shell: bash
         run: corepack enable && corepack prepare pnpm@8.15.9 --activate
 
+      # checkout 前移到 cloudflared 安装之前：安装脚本随仓库分发，
+      # 必须在调用前把工作区取下来（本步不依赖其他 checkout 产物）。
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install cloudflared and dependencies
         shell: bash
         run: |
@@ -113,15 +116,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y nginx mysql-client unzip
 
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared-linux-amd64.deb
+          bash "$GITHUB_WORKSPACE/.github/scripts/cloudflared/install_cloudflared.sh"
 
-      - uses: actions/checkout@v7
       - name: rclone-install
         shell: bash
         run: |
           set -euo pipefail
-          # 安装 rclone：GitHub Releases 直下 .deb，失败回退 rclone.org 安装脚本
+          # 安装 rclone：GitHub Releases 直下 .deb，并用同 Release 的 SHA256SUMS 校验（取不到校验和即失败）
           bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
       - name: rclone-config
         shell: bash
