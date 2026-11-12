@@ -41,6 +41,14 @@ if [ -n "$_ts_suffix" ] && [ "$_dns" != "openclaw.${_ts_suffix}" ]; then
   [ "$_dns" = "openclaw.${_ts_suffix}" ] || echo "⚠️ [serving] 当场改名未生效（当前 ${_dns}），交给守护重试"
 fi
 
+# OS hostname 同步：Tailscale 名已回到 openclaw 时，把继任轮的 openclaw-next 一并收回。
+# 2026-11-12 补：此前只收 Tailscale DNS 名，OS hostname 整轮停在 openclaw-next
+# （hostname / ZCode 设备名 / system_health 判定与 tailnet 名不一致）。
+_sync="${GITHUB_WORKSPACE}/.github/scripts/tailscale/ts-sync-os-hostname.sh"
+if [ -n "$_ts_suffix" ] && [ "$_dns" = "openclaw.${_ts_suffix}" ] && [ -f "$_sync" ]; then
+  bash "$_sync" openclaw || true
+fi
+
 if [ -n "$_ts_suffix" ] && [ "$_dns" != "openclaw.${_ts_suffix}" ] \
    && [ -f "${GITHUB_WORKSPACE}/.github/scripts/tailscale/ts-reclaim-hostname.sh" ]; then
   TS_API_KEY="${TS_API_KEY:-}" setsid nohup bash "${GITHUB_WORKSPACE}/.github/scripts/tailscale/ts-reclaim-hostname.sh" \

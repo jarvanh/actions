@@ -30,6 +30,8 @@
 #   job 结束随 runner 一起消失，无需收尾清理。
 set -uo pipefail
 
+_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 SUFFIX="${1:-}"
 RUN_ID="${2:-0}"
 TMPN="openclaw-tmp-r${RUN_ID}"
@@ -155,6 +157,11 @@ while true; do
       printf 'TS_IP=%s\n' "$IP"
     } > "$HOME/ts.env"
     echo "[ts-reclaim] $(date -u +%FT%TZ) ✅ 已收回 ${TARGET}，serve 已重建，ts.env 已更新"
+    # OS hostname 同步（2026-11-12）：继任轮开头写的是 openclaw-next，名字收回后
+    # 一并把 OS hostname 改回 openclaw，避免整轮 hostname 与 tailnet 名不一致。
+    if [ -f "${_here}/ts-sync-os-hostname.sh" ]; then
+      bash "${_here}/ts-sync-os-hostname.sh" openclaw || true
+    fi
     exit 0
   fi
 
