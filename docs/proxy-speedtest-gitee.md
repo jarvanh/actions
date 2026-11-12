@@ -207,9 +207,8 @@ commit 等一律排除，见下方「下载计时」）。
 | `PROXY_SPEEDTEST_DETACH` | 0（workflow 注入） | 1 = detach 后台自跑（本地手跑用） |
 | `PROXY_SPEEDTEST_GIST_FILENAME` / `_DESCRIPTION` | 见 workflow | Gist 文件名/描述 |
 | `PROXY_SPEEDTEST_MIN_MEGABIT` | 10 | 达标阈值（兆） |
-| `PROXY_SPEEDTEST_SPEED_METRIC` | upload | 判定指标 `upload`/`download`；主指标达标数 < 回退门槛且另一指标更多时自动改用另一指标（双向对称） |
-| `PROXY_SPEEDTEST_MIN_NODES` | 1 | 上传订阅的最少节点数，不足则不上传（通知显示「达标不足 N 个」） |
-| `PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES` | 3 | 判定指标回退门槛：主指标达标数 **< 该值** 且另一指标更多才改判。与 `MIN_NODES` 是两回事（后者只管传不传），别混用 |
+| `PROXY_SPEEDTEST_SPEED_METRIC` | upload | 判定指标 `upload`/`download`；主指标**凑不够一份订阅**（达标数 < `MIN_NODES`）且另一指标能凑够时，自动改用另一指标 |
+| `PROXY_SPEEDTEST_MIN_NODES` | 10 | 上传订阅的最少节点数，不足则不上传（通知显示「达标不足 N 个」）。**同时充当判定指标的回退门槛**（2026-11-12 合并为单一门槛） |
 
 ### 墙钟预算（到点收摊，三套共用）
 
@@ -240,24 +239,24 @@ variables → Actions → Variables 可随时改，留空走默认）：
 
 1. **阈值**：`兆 = round(MiB/s × 8)`，≥ `PROXY_SPEEDTEST_MIN_MEGABIT`（默认 10）为达标；
 2. **判定指标**：`PROXY_SPEEDTEST_SPEED_METRIC`（默认 `upload` 按上行）；
-3. **回退**：**主指标达标数 < `PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES`（默认 3）**
-   且**另一指标达标数更多**（`secondary > primary`）时，才改用另一指标。两条缺一不可——
-   只按门槛会在「换了反而更少」时误换，只按「更多」会在主指标只有 1 个时丢掉用户显式
-   配置的偏好（典型场景：公开节点上行普遍测不出，下行却全部达标）；
-4. **最少节点数**：最终达标数 < `PROXY_SPEEDTEST_MIN_NODES`（默认 1）就不上传订阅
+3. **回退**：**主指标凑不够一份订阅**（`primary < MIN_NODES`）且**另一指标能凑够**
+   （`secondary ≥ MIN_NODES`）时，才改用另一指标。两条缺一不可——只按前者会在
+   「换了也不够」时做无意义的切换，只按后者会丢掉用户显式配置的指标偏好；
+4. **最少节点数**：最终达标数 < `PROXY_SPEEDTEST_MIN_NODES`（默认 10）就不上传订阅
    （日志 `gist_skipped`，通知显示「达标不足 N 个 · 阈值 ≥X兆（按上行/下行）」）。
 
-⚠️ **回退门槛不能复用 `min_nodes`**（2026-09-14 事故 + 2026-09-17 解耦为独立配置）。
-`min_nodes` 的语义是「不足则不上传订阅」、默认 1；拿它当回退门槛就会变成「主指标有 1 个
-达标就永不回退」。实测 run 34859505000：19 个节点里上行只有 1 个测得出，下行 19 个全部
-达标，却因 `1 ≥ 1` 不回退 ⇒ **订阅里只剩 1 个节点**。两个语义必须分开：
-门槛单列 `PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES`（默认 3）——下限设小了永不回退、
-设大了又变成「达标不足就不上传」，绑在一起怎么调都是错的。
+⚠️ **回退门槛与「最少节点数」已合并为同一个值**（2026-11-12）。
+历史：2026-09-17 曾把两者解耦、单列 `PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES=3`，
+当时 `min_nodes` 是 1，绑定会让「主指标有 1 个就永不回退」（run 34859505000：下行 19 个
+全达标，订阅里只剩 1 个）。但 2026-10-19 起 `min_nodes` 默认改为 10，解耦反过来制造了
+`[3, 10)` 盲区——`primary=5` 时既不满足回退（5 ≥ 3）、又凑不够上传（5 < 10），
+订阅静默停更（run 42953380754 实锤）。两个门槛问的本来就是同一件事，合并后不再有
+不一致的可能。**旧的 `PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES` 已废弃：写在 env 里也
+不会被读取。**
 
-> 判据形式在 2026-09-17 从「倍率制」（`secondary ≥ ceil(primary × 1.5)`）改成「计数制」
-> （`primary < 门槛 且 secondary > primary`）：倍率制在 `primary` 很小时（如 1）要求
-> `secondary ≥ 2` 才换，与「计数制门槛 3」相比更宽松；两者都修掉了 `min_nodes` 事故，
-> 计数制的好处是门槛语义直白、可直接按「想让几个达标才算主指标可信」来调。
+> 判据演进：2026-09-17 从「倍率制」（`secondary ≥ ceil(primary × 1.5)`）改为「计数制」
+> （`primary < 门槛 且 secondary > primary`）；2026-11-12 再把门槛换成 `MIN_NODES`、
+> 并把 `secondary > primary` 收紧为 `secondary ≥ MIN_NODES`（只在真能出订阅时才换）。
 
 实际采用的指标会写进日志（`subscription_policy` / `subscription_metric_fallback` /
 `subscription_metric_kept`）与 TG 通知文案。节点必须有**可导出配置**才计入达标——否则导不进

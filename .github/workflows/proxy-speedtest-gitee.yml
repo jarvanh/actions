@@ -172,24 +172,19 @@ jobs:
           # 订阅导出策略（四套共用，脚本默认值；各脚本消费）：
           #   PROXY_SPEEDTEST_MIN_MEGABIT  达标阈值（兆，默认 10）
           #   PROXY_SPEEDTEST_SPEED_METRIC 判定指标 upload|download（默认 upload 按上行判定；
-          #                                主指标达标数 < 下面回退门槛且另一指标更多时改用另一指标）
+          #                                主指标凑不够一份订阅时，若另一指标能凑够就改用另一指标）
           #   PROXY_SPEEDTEST_MIN_NODES    上传订阅的最少节点数（默认 10，不足则不上传）
           #                                10 是 2026-10-19 主人定的口径：源枯竭时 qualified=1
           #                                也照旧上传，订阅里只剩一个节点不如不更新
-          #   PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES
-          #                                判定指标回退门槛（默认 3）：主指标达标数 < 该值且
-          #                                另一指标更多才改判。与 MIN_NODES 是两回事，别混用
-          # ⚠️ 阈值 10 → 5 兆（2026-11-11）：上传改成真传 10MiB 后，gitee 这条链路
-          # （单流 git push / clone 经代理回连 Gitee）的真实速率就是 ~0.6 MiB/s ≈ 5 Mbps，
-          # 实测 `upload_mibs` max 1.09、`download_mibs` max 0.83 ⇒ **没有任何节点过得了
-          # 10 兆线**：run 42822583603 `primary=0/secondary=0`、gist 因 `empty subscription
-          # text` 连续两轮不更新。5 兆对应 p50 附近（约半数节点过线），既保留筛选意义，
-          # 又不会让订阅永久停更。若要恢复「10 兆」口径，先换上行路径（见 README 的
-          # 上传修复说明），光调阈值没有意义。
-          PROXY_SPEEDTEST_MIN_MEGABIT: '5'
+          #                                **同时充当判定指标的回退门槛**（2026-11-12 合并；
+          #                                旧的 PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES 已废弃，
+          #                                写在 env 里也不会被读取）
+          # ⚠️ 阈值 2026-11-11 曾降到 5 兆、2026-11-12 改回 10 兆：真实带宽已经够得着
+          # 10 兆（run 43062540491：298/454 过线），低水位轮次交给「回退到 download」兜底，
+          # 不该为了保更新而放宽质量口径。
+          PROXY_SPEEDTEST_MIN_MEGABIT: '10'
           PROXY_SPEEDTEST_SPEED_METRIC: 'upload'
           PROXY_SPEEDTEST_MIN_NODES: '10'
-          PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES: '3'
           GH_TOKEN: ${{ secrets.PAT }}
           # 内置 GITHUB_TOKEN：GitHub API 匿名调用失败（共享出口 IP 60 次/h 限流）时的认证回退
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

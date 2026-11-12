@@ -135,8 +135,9 @@ CONFIG = {
     # 确认过的字节（`[debug-ul-ack] ratio`），不引入虚高。
     # 要测多会话聚合吞吐选 multi（实测 up 峰值 4→268 / 8→706 / 16→1785 Mbps，
     # up>0 率 8 连接最优 96%）。
-    # 订阅判定联动：上行「≥10兆」大多达标；达标不足时自动回退 download
-    # （PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES），链路不受影响。
+    # 订阅判定联动：上行「≥10兆」大多达标；若主指标凑不够一份订阅
+    # （upload 达标数 < PROXY_SPEEDTEST_MIN_NODES），自动改判 download，链路不受影响
+    # （2026-11-12 起回退门槛与最少节点数合并为同一个值，见 speedtest_common）。
     'TAIER_MODE': (os.environ.get('TAIER_MODE', '') or 'single').strip(),
     # 上游二进制把 --duration 硬钳制在 5-13（main.go），>13 会被压到 13。
     # 默认 13（2026-09-24 从 5 上调）：单节点成本 = 2×duration+5，duration 是最大且唯一

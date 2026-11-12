@@ -209,24 +209,19 @@ jobs:
           # 订阅导出策略（四套共用，脚本默认值；各脚本消费）：
           #   PROXY_SPEEDTEST_MIN_MEGABIT  达标阈值（兆，默认 10）
           #   PROXY_SPEEDTEST_SPEED_METRIC 判定指标 upload|download（默认 upload 按上行判定；
-          #                                主指标达标数 < 下面回退门槛且另一指标更多时改用另一指标）
+          #                                主指标凑不够一份订阅时，若另一指标能凑够就改用另一指标）
           #   PROXY_SPEEDTEST_MIN_NODES    上传订阅的最少节点数（默认 10，不足则不上传）
           #                                10 是 2026-10-19 主人定的口径：源枯竭时 qualified=1
           #                                也照旧上传，订阅里只剩一个节点不如不更新
-          #   PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES
-          #                                判定指标回退门槛（默认 3）：主指标达标数 < 该值且
-          #                                另一指标更多才改判。与 MIN_NODES 是两回事，别混用
-          # ⚠️ 阈值 10 → 5 兆（2026-11-11，与 gitee 同批）：上传改成真传 10MiB 后，cdn
-          # 这条链路的真实上行就是 ~0.7 MiB/s ≈ 5.8 Mbps（run 42953380754 实测
-          # p50 0.72、max 1.31 MiB/s）⇒ 10 兆（1.25 MiB/s）只有 5 个节点过线，**恰好落在
-          # 回退门槛 [3, MIN_NODES) 区间**：primary=5 ≥ 3 不触发 download 回退，又
-          # < min_nodes=10 不能上传 ⇒ 订阅静默停更（`qualified nodes < min_nodes`）。
-          # 上一轮能更新是因为 primary=0 触发了回退；可见「回退门槛 3」与「最少数 10」
-          # 之间存在真实盲区（另案处理，不在本次改动内）。降到 5 兆 ≈ p50。
-          PROXY_SPEEDTEST_MIN_MEGABIT: '5'
+          #                                **同时充当判定指标的回退门槛**（2026-11-12 合并；
+          #                                旧的 PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES 已废弃，
+          #                                写在 env 里也不会被读取）
+          # ⚠️ 阈值 2026-11-11 曾降到 5 兆、2026-11-12 改回 10 兆：真实带宽已经够得着
+          # 10 兆（run 43069430512：258/342 过线）。低水位轮次（如 run 42990195749 仅
+          # 19/393 过线）靠「primary < min_nodes ⇒ 回退 download」兜底，不会再静默停更。
+          PROXY_SPEEDTEST_MIN_MEGABIT: '10'
           PROXY_SPEEDTEST_SPEED_METRIC: 'upload'
           PROXY_SPEEDTEST_MIN_NODES: '10'
-          PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES: '3'
           # 订阅导出 + 上传 Gist：脚本复用 speedtest_gitee 的 build_subscription_yaml_text /
           # update_gist，把达标节点整理成可用订阅并发布到 GitHub 私有 Gist。
           #   PROXY_SPEEDTEST_SUB_URLS : 见上方同步骤 env 的原始订阅源定义，用于解析节点原始配置；留空则不上传 gist
