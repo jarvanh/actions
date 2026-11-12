@@ -1779,8 +1779,14 @@ _sync_task_impl() {
   fi
 
   # 预统计子目录总数（用于进度展示）
+  # ⚠️ 不能写 `grep -c … || echo 0`: grep -c 零命中时**已打印 0 且返回 1**，
+  #   `|| echo 0` 会再拼一个 0 ⇒ 值变 "0\n0"，下游的
+  #   `[ "$total_subdirs_count" -ge 2 ]` 与 `$((total_subdirs_count - …))` 直接报
+  #   integer expression expected。用 `|| true` + 正则防护（与 openlist_driver.sh
+  #   的 uploaded 计数同范式）。当前路径下 subdirs 非空、不会触发，但属结构性隐患。
   local total_subdirs_count
-  total_subdirs_count=$(echo "$subdirs" | grep -c . 2>/dev/null || echo 0)
+  total_subdirs_count=$(printf '%s\n' "$subdirs" | grep -c . 2>/dev/null || true)
+  [[ "$total_subdirs_count" =~ ^[0-9]+$ ]] || total_subdirs_count=0
 
   # 按子目录逐个同步（静默模式：无文件变更时跳过通知）
   SYNC_SKIP_QUIET=1
