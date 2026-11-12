@@ -118,7 +118,7 @@ def esc(s) -> str:
 
 
 def fmt_secs(x: float) -> str:
-    """时长中文形态（规范 · 时长写法 时长五层，按量级选，勿自创形态）。
+    """时长中文形态（规范 · 时长 五层，按量级选，勿自创形态）。
 
     ≥1h → X 小时 Y 分（分钟不补零）／≥1min → X 分钟／否则 X.XX 秒（两位小数）。
     禁英文紧凑时长（12.34s → 12.34 秒）。此前本函数恒走秒层，上传耗时 185 秒
@@ -376,7 +376,7 @@ def get_video_list():
             "❌ 获取远端文件列表失败",
             TG_SEP,
             f"📦 分组：{tg_entry(CAPTION_PREFIX)}",  # 机器值 → <code>（规范 · 取值行口径）
-            f"⚠️ 原因：lsjson 输出解析失败：{esc(e)}",
+            f"⚠️ 原因：lsjson 输出解析失败：<code>{esc(e)}</code>",
         ]))
         return [], []
 
@@ -759,5 +759,7 @@ if [ -n "$SKIPPED_DETAILS" ]; then
 fi
 tg_add_footer msg
 send_tg_chunked "$msg"
+# 供 workflow 的 always() 兜底步判断「汇总已发过」，避免崩溃时双发/漏发
+touch "${RUNNER_TEMP:-/tmp}/tg-channel-summary-sent" 2>/dev/null || true
 
 rm -rf "$TMP_DIR"

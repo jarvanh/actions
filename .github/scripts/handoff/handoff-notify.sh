@@ -9,7 +9,7 @@
 # 失败静默：任何发送错误都不影响交接（交接正确性优先于通知）。
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# 通知真源在顶层 source 一次（规范 · 4.4：不得放进函数体内）
+# 通知真源在顶层 source 一次（规范 · 通知函数的正确接法：不得放进函数体内）
 # shellcheck source=../telegram/tg_notify.sh
 source "${GITHUB_WORKSPACE:-$(cd "$here/../../.." && pwd)}/.github/scripts/telegram/tg_notify.sh"
 

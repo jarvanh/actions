@@ -242,7 +242,7 @@ check_openlist_storage_health() {
     # 展示时间统一东八区（规范 · 日期与相对时间）；first_seen 本身仍是 UTC epoch
     fs_txt=$(TZ=Asia/Shanghai date -d "@${first_seen}" '+%Y-%m-%d %H:%M' 2>/dev/null) || fs_txt=""
     if [ -n "$fs_txt" ]; then
-      tg_add_kv msg "已持续" "${dur_txt}（首次发现 ${fs_txt}，东八区）"
+      tg_add_kv msg "已持续" "${dur_txt} · 首次发现 ${fs_txt}（东八区）"
     else
       tg_add_kv msg "已持续" "$dur_txt"
     fi

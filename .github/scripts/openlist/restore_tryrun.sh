@@ -954,7 +954,7 @@ restore_try_run() {
     if [ "$TRYRUN_MISSING" -gt 0 ]; then
       # 缺失清单同样限量（8 条）—— 它才是真跑会失败的部分，但 777 条全列依旧会爆
       tg_add_section msg "⚠️ 网盘上找不到备份副本 · ${TRYRUN_MISSING}"
-      tg_add_block msg "$(tree_fold "$TRYRUN_MISSING_LIST" 8)"
+      tg_add_block msg "$(tree_code_fold "$TRYRUN_MISSING_LIST" 8)"
       tg_add_note msg "这批真跑恢复会失败（网盘上没有备份副本）；源盘原件都还在，备份记录也不会丢。"
     fi
     tg_add_note msg "每份文件的详细去向清单见本次运行的附件（tryrun.tsv）与运行日志。"

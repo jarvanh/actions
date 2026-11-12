@@ -138,8 +138,15 @@ jobs:
             tg_add_kv msg "处置" "本轮终止：不启动空库、不回传（防覆盖远端）"
             tg_add_note msg "OneDrive backup/bitwarden_latest.tar.gz 可作恢复素材；修复远端后手动 dispatch"
             tg_add_footer msg
+            _VW_NOTIFIED=1
             send_tg "$msg" alert || true
           }
+
+          # 已知失败路径会显式调用上面的函数；这里再兜一层，保证 sudo/chown/md5sum
+          # 这类未预期早退也留痕（规范 · 接线：兜底分支必须留痕）。_VW_NOTIFIED
+          # 防止已知路径重复发第二条。
+          _VW_NOTIFIED=0
+          trap '_rc=$?; if [ "$_rc" -ne 0 ] && [ "${_VW_NOTIFIED:-0}" = "0" ]; then notify_restore_failed "恢复步骤异常退出（退出码 $_rc）"; fi' EXIT
 
           # rclone 失败时 set -e 会直接退出，走不到后面的空库检查——必须先接住，
           # 否则「拉取失败」这条最需要告警的路径反而静默（规范 · 接线）。

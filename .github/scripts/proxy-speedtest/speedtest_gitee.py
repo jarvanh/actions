@@ -1793,7 +1793,7 @@ def build_summary_lines(*, started_at, ended_at, duration_text, alive_probe_coun
     # 「gist 节点」，标题变成「gist 节点 · Gitee 测速完成」。同一套测速会被定时轮和 gist
     # 抓取轮分别触发，标题不区分的话读者分不清通知来自哪一轮（规范 · 标题与分隔线）。
     _label = (merged_env().get('PROXY_SPEEDTEST_LABEL') or '').strip()
-    _title_prefix = f'{_label} · ' if _label else ''
+    _title_prefix = f'{esc(_label)} · ' if _label else ''
     summary_lines = [
         f'{_title_emoji} {_title_prefix}Gitee 测速完成',
         sep,

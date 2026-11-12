@@ -255,7 +255,7 @@ split_large_video() {
       "1. 获取/估算视频时长：${check_duration}" \
       "2. ffmpeg 成功退出：${check_ffmpeg}" \
       "3. 至少生成 1 个分片：${check_parts_generated}" \
-      "4. 每个分片 ≤ ${max_part_size} 字节：${check_parts_size}" \
+      "4. 每个分片 ≤ $(format_bytes "$max_part_size")：${check_parts_size}" \
       "5. 所有分片上传成功：${check_upload}" \
       "6. 满足以上条件后删除原始文件：${check_delete}"
   }
@@ -382,7 +382,7 @@ split_large_video() {
       fi
       check_ffmpeg="✅ 通过"
       check_parts_generated="✅ 通过 · ${generated_count} 个分片"
-      check_parts_size="✅ 通过 · 全部 ≤ ${max_part_size} 字节"
+      check_parts_size="✅ 通过 · 全部 ≤ $(format_bytes "$max_part_size")"
       split_success=1
       break
     fi

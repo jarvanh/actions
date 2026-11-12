@@ -666,18 +666,18 @@ def build_target_network_section(targets):
             continue
         if multi:
             lines.append(f'[{idx}] <code>{esc(label or server)}</code>')
-            lines.append(f'  ├─ 测速服务器：<code>{esc(server)}</code>')
+            lines.append(f'<code>  ├─ </code>测速服务器：<code>{esc(server)}</code>')
         elif label:
-            lines.append(f'  ├─ 测速服务器：<code>{esc(server)}</code> · <code>{esc(label)}</code>')
+            lines.append(f'<code>  ├─ </code>测速服务器：<code>{esc(server)}</code> · <code>{esc(label)}</code>')
         else:
-            lines.append(f'  ├─ 测速服务器：<code>{esc(server)}</code>')
+            lines.append(f'<code>  ├─ </code>测速服务器：<code>{esc(server)}</code>')
         isp, asn, loc = network_cells(info)
         # 取值行口径（规范 · 取值行口径）：一次归属查询返回的 ISP/ASN/位置 与 IP 同属机器
         # 返回值，整节同为 <code>；按「值不值得复制」逐个判断会产出等宽/正体交错的斑马纹
         lines += [
-            f'  ├─ ISP：<code>{esc(isp)}</code>',
-            f'  ├─ ASN：<code>{esc(asn)}</code>',
-            f'  └─ 位置：<code>{esc(loc)}</code>',
+            f'<code>  ├─ </code>ISP：<code>{esc(isp)}</code>',
+            f'<code>  ├─ </code>ASN：<code>{esc(asn)}</code>',
+            f'<code>  └─ </code>位置：<code>{esc(loc)}</code>',
         ]
     return lines
 

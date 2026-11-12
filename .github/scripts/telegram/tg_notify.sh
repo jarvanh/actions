@@ -20,7 +20,7 @@
 #   不传 tier   → 一般通知 → @FuckSaberBot（仓库 secrets.TELEGRAM_BOT_TOKEN）
 #   凭据缺失时发送失败并在日志留痕。调用点显式传档位，不按标题匹配。
 #   例外: openlist 进度面板直连 API（删旧发新依赖同 bot）固定主 bot，不参与路由。
-#   完整分工见 docs/telegram-notify.md 7.1 节（含本机 @ass_openclaw_bot 内部消息隔离带）。
+#   完整分工见 docs/telegram-notify.md「规范 · 全库 bot 分工」（含本机 @ass_openclaw_bot 隔离带）。
 # 收尾接线（可选，缺席时 tg_add_footer 优雅降级）:
 #   TG_RUN_URL        运行日志链接（workflow 注入 https://github.com/<repo>/actions/runs/<id>）
 #   TG_RUN_STARTED_AT  历史注入名，平台无 github.run_started_at 上下文、注入恒为空；
@@ -34,15 +34,17 @@
 #   {emoji} 分节 · N       ← tg_add_section（段前空行，紧跟标题时无；列表分节计数一律 " · N"）
 #   <code>├─/└─</code> 树形条目        ← 唯一条目前缀（tree_lines / tree_code_fold，无平铺形态；
 #                                  前缀自带等宽 <code>，比例字体正文区下竖线才能严格成列）
-#   <pre>日志</pre>              ← tg_add_block
+#   <pre>日志</pre>              ← tg_add_pre（转义 + <pre>；tg_add_block 只拼已含标签的片段）
 #   {可选 备注}            ← tg_add_note
 #   （空行）⏱ 已运行 X · 🔗 运行日志 ← tg_add_footer（全库唯一收尾形态，自带空行）
 # 函数:
-#   send_tg <text>                     单条发送（短消息用）
-#   send_tg_chunked <text>             分片发送（长消息用）
-#   escape_html / tg_append / tg_add_title / tg_add_kv / tg_add_path /
-#   tg_add_section / tg_add_note / tg_add_block / tg_add_footer
+#   send_tg <text> [tier]              单条发送（短消息用）
+#   send_tg_chunked <text> [tier]      分片发送（长消息用）
+#   escape_html / tg_append / tg_add_title / tg_add_kv / tg_add_path / tg_add_link /
+#   tg_add_section / tg_add_note / tg_add_block / tg_add_pre / tg_add_footer
+#   tg_entry / tg_entry_text / tg_entry_pair / tg_entry_codes（及对应 tg_add_* 累积版）
 #   format_bytes / tg_format_ms / tg_format_duration（大小与时长口径）
+#   tg_tail_safe / tg_tail_file_safe（UTF-8 安全的尾部截断）
 #   tree_conn / tree_sub / tree_lines / tree_code_fold / tree_fold（树形条目与折叠；
 #     tree_code_fold 收裸文本、tree_fold 收已构建条目流，勿互换）
 

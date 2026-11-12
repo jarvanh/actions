@@ -810,7 +810,7 @@ def build_telegram_lines(results, meta, direct_ip, bypass_hits, gist_res, bundle
     # 判据与注释、台账 1.6（0 成功 / 疑似未走代理降级 ⚠️）一致。
     _title_emoji = '⚠️' if (not ok_results or bypass_hits or aborted_due_to_runtime) else '✅'
     _label = (merged_env().get('PROXY_SPEEDTEST_LABEL') or '').strip()
-    _title_prefix = f'{_label} · ' if _label else ''
+    _title_prefix = f'{esc(_label)} · ' if _label else ''
     lines = [
         f'{_title_emoji} {_title_prefix}泰尔三网测速',
         sep,

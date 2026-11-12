@@ -104,7 +104,7 @@ def main():
     okv, d, err = t.probe_node_alive('absent', _tbl)
     check(okv is False and d is None, f'表里没有 → 判死（实际 {okv}/{d}）')
     # 判死串必须带前缀：通知的 ❌ 失败会原样展示它，读者要能分清「测活阶段就死」
-    # 与「测速阶段失败」（规范 · 2.8 taier 专属分节）。
+    # 与「测速阶段失败」（规范 · 分节）。
     check(str(err).startswith('测活未通过：'),
           f'判死错误串带「测活未通过：」前缀（实际 {err}）')
 
@@ -358,7 +358,7 @@ def main():
     #   拿不到表 ⇒ 探测层整体关闭、不产生判死条目（机制没给结论就不能判死）；
     #   拿到了 ⇒ 「表里没有」是 mihomo 的真判死结论，与测速失败同类，进 ❌ 失败。
     # 旧分节记的是「探测机制没跑通」的误伤（逐个探 `/proxies/{name}` 恒 404 时每轮必现），
-    # 新判据下不复存在；若再出现即为回退（规范 · 2.8 taier 专属分节）。
+    # 新判据下不复存在；若再出现即为回退（规范 · 分节）。
     probe_dead = [{'ok': False, 'bypass': False, 'up': 0.0, 'down': 0.0, 'name': f'p{i}',
                    'error': '测活未通过：组测速无延迟值（连不上）'}
                   for i in range(8)]

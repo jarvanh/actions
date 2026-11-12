@@ -1341,7 +1341,7 @@ jobs:
           # 不足 1 秒整数毫秒——实测读文件头只要 20~30ms，按秒两位小数会显示成
           # "0.00 秒"。真源唯一实现，此处不再内联副本。
 
-          # 取直链的冷/热标注（规范 · 起播等待）：优先用 odlink 的真实缓存命中标记
+          # 取直链的冷/热标注（docs/emby.md「起播等待」）：优先用 odlink 的真实缓存命中标记
           # （/opt/odlink-last.json 的 cached，60 秒内才算本次播放的），拿不到就按耗时
           # 兜底（热 3~6ms、冷 0.4~1.3s，阈值 EMBY_LINK_HOT_MS 默认 200ms 可分）；
           # 两者都取不到则留空——宁可不标，也不猜。
@@ -1472,7 +1472,7 @@ jobs:
 
             # 第 4 行：客户端。IP 来自 ge2o 访问日志（谁在播）
             IFS=$'\037' read -r cname dev <<<"$(client_meta "$iid")"
-            # 字段序与规范 · Emby 示例一致：IP（谁）在前，客户端与设备在后
+            # 字段序与 docs/emby.md「播放通知」示例一致：IP（谁）在前，客户端与设备在后
             client=$(join_parts "$(escape_html "$cip")" "$(escape_html "$cname")" "$(escape_html "$dev")")
 
             # 第 5 行起：起播等待（KV 树，与测速四套「📍 测速点网络」同款，tree_lines 渲染）。

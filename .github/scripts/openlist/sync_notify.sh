@@ -278,7 +278,7 @@ _send_sync_result_notification() {
       # 英文 token 中文化（规范 · 失败与异常：退出码 45，而不是 exit=45）
       err_status="部分文件同步失败 · 退出码 ${sync_status}"
     else
-      err_title="⚠️ ${task_name} 同步失败"
+      err_title="❌ ${task_name} 同步失败"
       err_status="同步失败 · 退出码 ${sync_status}"
     fi
     local err_msg=""

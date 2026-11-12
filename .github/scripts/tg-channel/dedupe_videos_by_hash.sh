@@ -47,6 +47,14 @@ _grp_fold() {
   [ "$GRP_HIDDEN" -gt 0 ] && printf '%s' "还有 ${GRP_HIDDEN} 条…"$'\n'
   return 0
 }
+# rclone 的 t 是 runner 本地（UTC）时间；通知展示统一东八区（规范 · 日期与相对时间）。
+# 解析失败保留原值，不吞信息。
+_bj_time() {
+  local raw="$1" out=""
+  [ -n "$raw" ] || return 0
+  out=$(TZ=Asia/Shanghai date -d "$raw" '+%Y-%m-%d %H:%M' 2>/dev/null) || out=""
+  printf '%s' "${out:-$raw}"
+}
 _grp_block() {
   if [ "$GRP_BLOCK_SHOWN" -ge 8 ]; then
     GRP_BLOCK_HIDDEN=$((GRP_BLOCK_HIDDEN + 1))
@@ -160,13 +168,13 @@ for hash in "${!HASH_ENTRIES[@]}"; do
       if [ "$AUTO_DELETE" = "true" ]; then
         if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
           REMOVED_COUNT=$((REMOVED_COUNT + 1))
-          _grp_add group_entries "🗑 删除 $(tg_entry "${p}" "$(format_bytes "$s")" "${t}")"$'\n'
+          _grp_add group_entries "🗑 删除 $(tg_entry "${p}" "$(format_bytes "$s")" "$(_bj_time "$t")")"$'\n'
         else
           _grp_add group_entries "❌ 删除失败 $(tg_entry "${p}")"$'\n'
           echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
         fi
       else
-        _grp_add group_entries "⚠️ 待删除 · 已跳过 $(tg_entry "${p}" "$(format_bytes "$s")" "${t}")"$'\n'
+        _grp_add group_entries "⚠️ 待删除 · 已跳过 $(tg_entry "${p}" "$(format_bytes "$s")" "$(_bj_time "$t")")"$'\n'
       fi
     done <<< "$sorted"
     _fold=$(_grp_fold)

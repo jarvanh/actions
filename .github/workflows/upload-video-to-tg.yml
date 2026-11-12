@@ -83,6 +83,7 @@ jobs:
 
       # ============ 步骤3：将 OneDrive 中尚未上传的视频补传到 Telegram 频道 ============
       - name: send videos to telegram
+        id: sync
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -97,3 +98,22 @@ jobs:
             "$SOURCE_REMOTE" \
             "${TG_CHANNEL_ID}" \
             "91"
+
+      # 崩溃/被取消时脚本走不到汇总通知（它在末尾才发），这里按 always() 兜底。
+      # 已发过汇总（marker 存在）或步骤正常成功则不补发，避免双条。
+      - name: notify channel sync abnormal exit
+        if: ${{ always() }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SYNC_RESULT: ${{ steps.sync.outcome }}
+        run: |
+          set -uo pipefail
+          [ "${SYNC_RESULT:-}" = "success" ] && exit 0
+          [ -f "${RUNNER_TEMP:-/tmp}/tg-channel-summary-sent" ] && exit 0
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+          msg=""
+          tg_add_title msg "❌ 频道同步异常退出"
+          tg_add_kv msg "结果" "同步脚本未产出汇总通知（退出状态 ${SYNC_RESULT:-unknown}）"
+          tg_add_footer msg
+          send_tg_chunked "$msg" || echo "::warning::TG 兜底通知发送失败（不影响任务）"

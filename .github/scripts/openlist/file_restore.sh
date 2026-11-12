@@ -365,7 +365,11 @@ restore_fixed_files() {
 
   # 汇总通知
   local msg=""
-  tg_add_title msg "🔧 修复文件一键还原完成"
+  if [ "$total_ok" -eq 0 ] && [ "$total_fail" -gt 0 ]; then
+    tg_add_title msg "❌ 修复文件一键还原失败"
+  else
+    tg_add_title msg "🔧 修复文件一键还原完成"
+  fi
   tg_add_kv msg "已还原" "${total_ok} 个"
   tg_add_kv msg "已失效出账" "${total_stale} 个"
   tg_add_kv msg "跳过待确认" "${total_skip} 个"

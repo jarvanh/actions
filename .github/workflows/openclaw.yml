@@ -2183,11 +2183,17 @@ jobs:
               tg_add_kv msg "回退来源" "$_fvs"
             fi
             [ -n "$recorded_successful_version" ] && tg_add_path msg "成功版本记录" "$recorded_successful_version"
-            # 耗时走 tg_format_ms（规范 · 时长写法第 3/4 层），不再一律按秒两位小数
+            # 耗时走 tg_format_ms（规范 · 时长第 3/4 层），不再一律按秒两位小数
             [ -n "$initial_start_duration_sec" ] && tg_add_kv msg "首次启动耗时" "$(tg_format_ms "$initial_start_duration_sec")"
             [ -n "$preflight_doctor_duration_sec" ] && tg_add_kv msg "预检修复耗时" "$(tg_format_ms "$preflight_doctor_duration_sec")"
             [ -n "$fallback_reinstall_duration_sec" ] && tg_add_kv msg "回退重装耗时" "$(tg_format_ms "$fallback_reinstall_duration_sec")"
-            [ -n "$ssh_entry" ] && tg_add_path msg "SSH 调试" "$ssh_entry"
+            # 可执行命令才等宽；「暂不可用」是自然语言，走裸文本（规范 · 取值行口径）
+            if [ -n "$ssh_entry" ]; then
+              case "$ssh_entry" in
+                tailscale\ ssh*) tg_add_path msg "SSH 调试" "$ssh_entry" ;;
+                *)                tg_add_kv   msg "SSH 调试" "$ssh_entry" ;;
+              esac
+            fi
             tg_add_section msg "🧾 关键日志"
             # 走真源 tg_add_pre（转义 + <pre> 包裹），与同文件归档告警同款；
             # 此前本处手拼 <pre>，是 tg_add_pre 的重复实现
@@ -2656,7 +2662,7 @@ jobs:
           # 统一 HTML 通知 + 统一收尾区（tg_notify.sh，checkout 后可用）。
           # TG_RUN_URL 由本 step 的 env 注入，tg_add_footer 直接读取；时长走开机时刻兜底。
           # 版式与 tailscale-windows.yml "🟢 Windows runner 已就绪" 同款：
-          # 按套分节（规范 · 凭据与入口：多套同类信息各占一分节）+ 组内树形条目，凭据/网络/出口/AI 网关
+          # 按套分节（规范 · 入口与凭据：多套同类信息各占一分节）+ 组内树形条目，凭据/网络/出口/AI 网关
           # 各归其节，避免一级平铺 10 行 kv 混排
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
           msg=""
@@ -5711,6 +5717,8 @@ jobs:
           # 标题按严重度降级（规范 · 状态图标）：全败 ❌ > 有失败 ⚠️ > 全成 ✅
           if [ "$fail_n" -gt 0 ] && [ "$ok_n" -eq 0 ]; then
             tg_add_title msg "❌ OpenClaw ${_label}失败"
+          elif [ "$ok_n" -eq 0 ]; then
+            tg_add_title msg "⚠️ OpenClaw ${_label}完成 · 全部跳过"
           elif [ "$fail_n" -gt 0 ]; then
             tg_add_title msg "⚠️ OpenClaw ${_label}完成 · 部分失败"
           else
