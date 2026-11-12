@@ -264,6 +264,17 @@ gd**（两者源端合计 1527 GiB，而 gd 实际可用约 927 GiB，容量也�
 `rclone deletefile` **删除源端**原始大文件（"绝对不修改源端"红线），而 Drive 单文件
 上限 5 TiB 根本不需要切割。
 
+**配额已满 ⇒ 快速失败（2026-11-12 加）**：Drive 返回
+`403 ... storage quota has been exceeded` 属**账号侧终态**，重试不会自愈。
+实测（run 43001486184）rclone 内部 `--retries 3`、每次约 3 分钟 ⇒ 一个 gd 对白烧
+~13 分钟，5 个 gd 对 ≈ 65 分钟（占 320 分钟预算 20%）且必然 0 产出。
+现行为：`sync_with_logging` 识别该错误后 ①立即判失败（**不**冒充"到点交棒"）
+②写 `/tmp/ol_quota_exhausted_<backend>` 标记（每轮新 runner，`/tmp` 天然清空 ⇒
+容量恢复后下一轮自动参战）③跳过镜像清理 / truth-check / 修复管线（配额满时全是空转）
+④并行调度看到标记即**跳过同后端其余同步对**，不再起 worker 烧重试。
+⚠️ 这是运维信号不是代码 bug：出现即说明该盘需要扩容或清理（`rclone about gd:` 可看
+`Total/Used`；实测曾出现 `Used 2.883 TiB / Total 15 GiB` —— 付费容量掉了）。
+
 ---
 
 ## 环境变量
