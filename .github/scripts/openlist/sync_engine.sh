@@ -584,7 +584,14 @@ sync_with_logging() {
   fi
   if [ "$_quota_hit" -eq 1 ]; then
     local _qroot
-    _qroot=$(_backend_root_of "$dest_path" 2>/dev/null || echo "$dest_path")
+    # 键必须按**远端**分组（gd / openlist:<upstream>），不能用 _backend_root_of：
+    #   后者对非 openlist 目标返回整个 dest 路径 ⇒ gd:0/gd:1/gd:backup 各成一键，
+    #   「跳过同后端」永远匹配不到（run 43125112722 实测命中 0 次、403 仍 17 次）。
+    if declare -F _quota_backend_key >/dev/null 2>&1; then
+      _qroot=$(_quota_backend_key "$dest_path")
+    else
+      _qroot=$(_backend_root_of "$dest_path" 2>/dev/null || echo "$dest_path")
+    fi
     echo "🈵 目标端配额已满（${_qroot}）: 写入被服务端拒绝 → 本轮跳过该后端其余同步对（扩容/清理容量后自愈，非代码问题）"
     SYNC_FAILED=1
     SYNC_TIME_EXHAUSTED=0

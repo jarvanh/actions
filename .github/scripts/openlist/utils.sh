@@ -174,3 +174,24 @@ format_bytes_iec() {
 b64url_encode() {
   printf '%s' "$1" | base64 | tr '+/' '-_' | tr -d '='
 }
+
+# ===== 配额/容量类故障的「后端身份」键（2026-11-12 加）=====
+# 为什么不能用 _backend_root_of: 它对**非 openlist** 目标返回整个 dest 路径
+#   （`gd:0` / `gd:1` / `gd:backup` 各成一个键），而容量配额是**按远端（盘）**
+#   共享的 —— 同一个 Drive 满了，5 个 gd 对全都写不进。
+#   现场（run 43125112722，head a9868a0）: 标记被写成 `gd:0`、`gd:backup` 两个
+#   不同键 ⇒「跳过同后端其余同步对」命中 **0 次**，`storage quota has been
+#   exceeded` 仍出现 **17 次**（5 个 gd 对 × 内部 3 次重试），省重试完全落空。
+# 语义: 同一个远端/上游盘共享容量 ⇒ 同键。
+#   openlist:wopan175/1/... → openlist:wopan175（按挂载上游区分，容量各自独立）
+#   gd:0 / gd:backup        → gd              （整个 Drive 共用一个配额）
+#   onedrive:1              → onedrive
+#   无冒号（本地路径）       → 原样
+_quota_backend_key() {
+  local p="${1:-}"
+  case "$p" in
+    openlist:*) printf 'openlist:%s' "${p#openlist:}" | cut -d/ -f1 ;;
+    *:*)        printf '%s' "${p%%:*}" ;;
+    *)          printf '%s' "$p" ;;
+  esac
+}

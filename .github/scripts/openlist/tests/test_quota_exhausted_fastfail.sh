@@ -73,6 +73,12 @@ _sync_serialize_fixed_files() { :; }
 _sync_accumulate_fixed_results() { :; }
 get_transferred_bytes_from_log() { echo 0; }
 _send_sync_result_notification() { NOTIFY_STATUS="$4"; }
+# _quota_backend_key 的真源在 utils.sh（基础层）。必须加载**真实现**：
+# 用桩就测不到"键按远端分组"这个真缺陷（run 43125112722 现场: 标记被写成
+# gd:0/gd:backup 两个键 ⇒ 跨对跳过命中 0 次、403 仍 17 次）。
+source "$_REPO_ROOT/.github/scripts/openlist/utils.sh" 2>/dev/null || true
+declare -F _quota_backend_key >/dev/null 2>&1 \
+  || { echo "FATAL: _quota_backend_key 未定义（utils.sh 未加载）—— 跨对断言会假绿"; exit 1; }
 source "$WORK/qf.sh"
 source "$WORK/swl.sh"
 
@@ -108,12 +114,41 @@ _nf=$(ls "$OPENLIST_QUOTA_FLAG_DIR" 2>/dev/null | wc -l | tr -d ' ')
 [ -z "$DOWNSTREAM" ] && ok "Q3 不做下游（清理/truth/修复全跳过，配额满时都是空转）" || bad "Q3 仍执行了下游: $DOWNSTREAM"
 
 # ---------- Q4: 调度据此跳过 ----------
-QUOTA_BE="gd:backup"
-if _quota_backend_flagged "gd:backup"; then ok "Q4 调度可查到该后端已判配额满"; else bad "Q4 标记查不到"; fi
+if _quota_backend_flagged "$(_quota_backend_key gd:backup)"; then ok "Q4 调度可查到该后端已判配额满"; else bad "Q4 标记查不到"; fi
+
+# ---------- Q4b: 跨对跳过（2026-11-12 修的真缺陷）----------
+# 现场（run 43125112722）: 标记被写成 `gd:0` / `gd:backup` 两个**不同**键
+#   ⇒「跳过同后端」命中 0 次、403 仍出现 17 次（5 个 gd 对各烧 3 次重试）。
+#   根因: 旧实现用 _backend_root_of，它对非 openlist 目标返回整个 dest 路径。
+#   修: 按远端身份分组（gd:0/gd:1/gd:backup 全部 → gd）。
+_eq_key() {  # 断言两个 dest 归到同一个配额键
+  local a b
+  a=$(_quota_backend_key "$1"); b=$(_quota_backend_key "$2")
+  [ "$a" = "$b" ] && echo same || echo "diff:${a}/${b}"
+}
+[ "$(_eq_key gd:0 gd:1)" = same ] && ok "Q4b gd:0 与 gd:1 归同一配额键（可跨对跳过）" || bad "Q4b $(_eq_key gd:0 gd:1)"
+[ "$(_eq_key gd:backup gd:1)" = same ] && ok "Q4c gd:backup 与 gd:1 归同一配额键" || bad "Q4c $(_eq_key gd:backup gd:1)"
+[ "$(_quota_backend_key 'gd:0')" = "gd" ] && ok "Q4d 键值就是远端名 gd（不带路径）" || bad "Q4d 键=$(_quota_backend_key gd:0)"
+# openlist 必须按上游区分（各盘容量独立，不能一锅端）
+[ "$(_quota_backend_key 'openlist:wopan175/1')" = "openlist:wopan175" ] \
+  && ok "Q4e openlist 按挂载上游区分（wopan175）" || bad "Q4e 键=$(_quota_backend_key 'openlist:wopan175/1')"
+[ "$(_eq_key 'openlist:wopan175/1' 'openlist:wopan176Crypt/1')" != same ] \
+  && ok "Q4f wopan175 与 wopan176Crypt 不共享配额键（不误跳过）" || bad "Q4f 两者被并成一个键"
+
+# ---------- Q4g: 端到端——一个对触发后，同盘其余对全部可跳过 ----------
+rm -f "$OPENLIST_QUOTA_FLAG_DIR"/* 2>/dev/null || true
+run_case "gd:0" 1 0        # gd:0 撞 403 → 写 gd 键
+for _d in "gd:1" "gd:2" "gd:3" "gd:backup"; do
+  if _quota_backend_flagged "$(_quota_backend_key "$_d")"; then
+    ok "Q4g 同盘 ${_d} 命中标记 → 会被跳过（不再烧 3 次重试）"
+  else
+    bad "Q4g 同盘 ${_d} 未命中标记（跨对跳过失效）"
+  fi
+done
 
 # ---------- Q5: 无标记不误跳过 ----------
 rm -f "$OPENLIST_QUOTA_FLAG_DIR"/* 2>/dev/null || true
-if _quota_backend_flagged "gd:0"; then bad "Q5 无标记却判配额满"; else ok "Q5 无标记 → 不跳过（不误伤）"; fi
+if _quota_backend_flagged "$(_quota_backend_key gd:0)"; then bad "Q5 无标记却判配额满"; else ok "Q5 无标记 → 不跳过（不误伤）"; fi
 
 # ---------- Q6: 普通错误不触发 ----------
 run_case "gd:0" 0 1

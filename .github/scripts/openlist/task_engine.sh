@@ -259,11 +259,19 @@ _run_registry_pairs_parallel() {
       _e="${SYNC_TASK_REGISTRY[$idx]}"
       IFS='|' read -r _ _ _dst _ _ <<< "$_e"
       _be=$(_task_backend_root_of "$_dst")
-      # 目标端配额已满（本轮内其他 gd 对已实证 403）→ 跳过，别再烧重试
-      if _quota_backend_flagged "$_be"; then
-        if [ -z "${_quota_logged[$_be]:-}" ]; then
-          echo "🈵 后端 ${_be} 本轮已判「配额已满」，跳过其剩余同步对（第 $((idx + 1))/${n} 个起；扩容/清理后下轮自愈）"
-          _quota_logged[$_be]=1
+      # 配额标记按远端身份查（gd:* 共用 gd；openlist:* 保留 upstream 名），
+      #   不能用 _be（它是同后端并发互斥键，gd:0/gd:1 必须可并行，粒度不同）。
+      _quota_be=""
+      if declare -F _quota_backend_key >/dev/null 2>&1; then
+        _quota_be=$(_quota_backend_key "$_dst")
+      else
+        _quota_be="$_be"
+      fi
+      # 目标端配额已满（本轮内其他对已实证 403）→ 跳过，别再烧重试
+      if _quota_backend_flagged "$_quota_be"; then
+        if [ -z "${_quota_logged[$_quota_be]:-}" ]; then
+          echo "🈵 后端 ${_quota_be} 本轮已判「配额已满」，跳过其剩余同步对（第 $((idx + 1))/${n} 个起；扩容/清理后下轮自愈）"
+          _quota_logged[$_quota_be]=1
         fi
         _started[$idx]=1
         _done_n=$((_done_n + 1))
