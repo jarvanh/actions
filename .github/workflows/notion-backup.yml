@@ -51,3 +51,29 @@ jobs:
       - name: Clean up cookies
         if: always()
         run: rm -f /tmp/notion-cookies.json
+
+      - name: Notify Telegram
+        if: always()
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "${JOB_STATUS}" = "success" ]; then
+            ICON="✅"; TITLE="Notion 备份成功"
+          elif [ "${JOB_STATUS}" = "cancelled" ]; then
+            ICON="⚪"; TITLE="Notion 备份被取消"
+          else
+            ICON="❌"; TITLE="Notion 备份失败"
+          fi
+          TEXT="${ICON} ${TITLE}
+          时间: $(date -u '+%Y-%m-%d %H:%M UTC')
+          运行: ${RUN_URL}"
+          curl -fsS --retry 3 --retry-delay 5 \
+            -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${TEXT}" \
+            --data-urlencode "disable_web_page_preview=true" >/dev/null
