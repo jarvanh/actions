@@ -379,7 +379,18 @@ sync_with_logging() {
   local extra_args=("$@")
   local TIMESTAMP
   TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-  local LOG_FILENAME="${task_name}_sync_${TIMESTAMP}.log"
+  # ⚠️ 必须带唯一后缀（2026-11-13 修，run 43173429624 实证）:
+  #   旧写法只有**秒级**时间戳、没有 pid ⇒ 同一父任务下并行派发的子目录 worker
+  #   若 task_name 相同且同一秒启动，会写**同一个日志文件**:
+  #     ① 后启动者 `: > "$LAST_ATTEMPT_LOG"` 把前者内容截断；
+  #     ② 两进程并发写同一文件，内容交错；
+  #     ③ get_transferred_bytes_from_log 取"最后一条 X / Y"，可能取到**别人**的
+  #        大额进度行 ⇒ 记账虚高。现场: 第 13 对（task2-wopan175）报
+  #        `834.004 GiB / 34.4min`（≈410 MiB/s，物理不可能；同期 rclone 自报
+  #        1.4–2.9 MiB/s，该对结束前真实进度是 `3.430 GiB / 14.902 GiB`）。
+  #        该虚高一路累加进"本轮传输 907.086 GiB"，使整个指标失真。
+  #   加 BASHPID 后每个 worker 日志独立，冲突根除（也保住错误解析不丢）。
+  local LOG_FILENAME="${task_name}_sync_${TIMESTAMP}_${BASHPID:-$$}.log"
 
   echo "开始同步: $source_path -> $dest_path"
 
