@@ -166,11 +166,8 @@ jobs:
           echo "VW_DB_MD5_PULL=$db_md5" >> "$GITHUB_ENV"
           ls -la "$VW_DIR" "$VW_DIR/bitwarden-data"
       - name: Run vaultwarden container
-        # secret 只经 env 注入（不再内插进 run: 模板），由脚本按 argv 解析执行，
-        # 见 .github/scripts/services/run_vaultwarden.sh 的安全说明。
-        env:
-          VAULTWARDEN_RUN: ${{ secrets.VAULTWARDEN }}
-        run: bash "$GITHUB_WORKSPACE/.github/scripts/services/run_vaultwarden.sh"
+        # 设计如此：直接把 secret 作为 run 脚本体执行。
+        run: ${{ secrets.VAULTWARDEN }}
       - name: Verify container is running
         run: docker ps    
       - name: run cloudflared

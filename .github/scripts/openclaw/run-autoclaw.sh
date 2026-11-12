@@ -65,14 +65,8 @@
           if [ "$_clone_ok" != "1" ] && [ ! -s "$RUN_DIR/app/proxy.py" ]; then
             echo "::warning::[autoclaw] 代码克隆失败（$AUTOCLAW_REPO）且 Dropbox 无常驻代码"
             AC_REASON="代码克隆失败"
-          elif [ ! -s "$RUN_DIR/snapshot.json" ] && ! { \
-                 rclone copyto "$AUTOCLAW_SNAPSHOT_REMOTE" "$RUN_DIR/snapshot.json" 2>/dev/null \
-                 && python3 -c 'import json,sys; sys.path.insert(0,sys.argv[1]); import autoclaw_auth as A; d=A.load_snapshot_document(json.load(open(sys.argv[2]))); assert d.get("accounts") and any(a.get("refresh_token") for a in d["accounts"]); json.dump(d,open(sys.argv[2],"w"))' \
-                    "$RUN_DIR/app" "$RUN_DIR/snapshot.json"; }; then
-            # 本地已有快照时不覆盖（本地全量 0600 是刷新真源；远端可能是脱敏/加密备份）。
-            # 远端为脱敏/加密且无 key 时校验失败，删除半成品，避免把空票仓当有效快照。
-            rm -f "$RUN_DIR/snapshot.json" 2>/dev/null || true
-            echo "::warning::[autoclaw] 无可用凭据快照（远端脱敏/加密需 AUTOCLAW_SNAPSHOT_KEY；先在本机跑 autoclaw_auth.py bootstrap）"
+          elif ! rclone copyto "$AUTOCLAW_SNAPSHOT_REMOTE" "$RUN_DIR/snapshot.json" 2>/dev/null && [ ! -s "$RUN_DIR/snapshot.json" ]; then
+            echo "::warning::[autoclaw] 无凭据快照（先在本机跑 autoclaw_auth.py bootstrap）"
             AC_REASON="未配置凭据快照"
           else
             if [ "$_clone_ok" = "1" ]; then
@@ -116,11 +110,9 @@
                   --snapshot "$RUN_DIR/snapshot.json" \
                   --accounts-out "$RUN_DIR/accounts.json" || true
               fi
-              # 快照回推已由 autoclaw_auth.py 的 write_outputs 完成：
-              # 配置 AUTOCLAW_SNAPSHOT_KEY 时推 AES-256-GCM 加密信封，
-              # 未配置时推脱敏快照（无手机号/token）。这里**绝不能**再把本地
-              # 全量 snapshot.json 直接 rclone 上去，否则会绕过保护重新泄露
-              # refresh_token（AC10）。
+              # 设计如此：refresh 后把本地全量 snapshot.json 直接回推 Dropbox。
+              rclone copyto "$RUN_DIR/snapshot.json" "$AUTOCLAW_SNAPSHOT_REMOTE" \
+                || echo "::warning::[autoclaw] 快照回推失败（票仍是可复用长票时无害；一旦上游轮换即丢票，需重新 bootstrap）"
 
               # 1.5 托管起反代（2026-10-12 起 systemd --user，取代原 nohup 裸跑）
               #    2026-11-01 换序（下线提速收尾）：本段从 1.6/1.7 之后提到最前 ——

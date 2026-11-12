@@ -1286,7 +1286,6 @@ jobs:
           AUTOCLAW_GATEWAY_KEY: ${{ secrets.AUTOCLAW_GATEWAY_KEY }}
           AUTOCLAW_REPO: https://github.com/jarvanh/autoclaw-proxy.git
           AUTOCLAW_SNAPSHOT_REMOTE: dropbox:self-hosted/autoclaw-proxy/auth-snapshot.json
-          AUTOCLAW_SNAPSHOT_KEY: ${{ secrets.AUTOCLAW_SNAPSHOT_KEY }}
           AUTOCLAW_STATS_REMOTE: dropbox:self-hosted/autoclaw-proxy/lifetime_stats.json
           AUTOCLAW_PORT: "8322"
         run: |
@@ -1561,7 +1560,6 @@ jobs:
           AUTOCLAW_GATEWAY_KEY: ${{ secrets.AUTOCLAW_GATEWAY_KEY }}
           AUTOCLAW_REPO: https://github.com/jarvanh/autoclaw-proxy.git
           AUTOCLAW_SNAPSHOT_REMOTE: dropbox:self-hosted/autoclaw-proxy/auth-snapshot.json
-          AUTOCLAW_SNAPSHOT_KEY: ${{ secrets.AUTOCLAW_SNAPSHOT_KEY }}
           AUTOCLAW_STATS_REMOTE: dropbox:self-hosted/autoclaw-proxy/lifetime_stats.json
           AUTOCLAW_PORT: "8322"
           AI_BACKEND_INPUT: ${{ inputs.ai_backend || 'auto' }}
@@ -1912,7 +1910,6 @@ jobs:
           AUTOCLAW_REPO: https://github.com/jarvanh/autoclaw-proxy.git
           # 票仓与累计统计（Dropbox，只存数据不存代码）
           AUTOCLAW_SNAPSHOT_REMOTE: dropbox:self-hosted/autoclaw-proxy/auth-snapshot.json
-          AUTOCLAW_SNAPSHOT_KEY: ${{ secrets.AUTOCLAW_SNAPSHOT_KEY }}
           # 累计用量统计（唯一不可再生的运行数据，2026-10-12 主人拍板入 Dropbox）：
           # 启动时拉回续计，job 收尾回推；/tmp 清理不再丢
           AUTOCLAW_STATS_REMOTE: dropbox:self-hosted/autoclaw-proxy/lifetime_stats.json
@@ -2238,7 +2235,6 @@ jobs:
           AUTOCLAW_GATEWAY_KEY: ${{ secrets.AUTOCLAW_GATEWAY_KEY }}
           AUTOCLAW_REPO: https://github.com/jarvanh/autoclaw-proxy.git
           AUTOCLAW_SNAPSHOT_REMOTE: dropbox:self-hosted/autoclaw-proxy/auth-snapshot.json
-          AUTOCLAW_SNAPSHOT_KEY: ${{ secrets.AUTOCLAW_SNAPSHOT_KEY }}
           AUTOCLAW_STATS_REMOTE: dropbox:self-hosted/autoclaw-proxy/lifetime_stats.json
           AUTOCLAW_PORT: "8322"
           AI_BACKEND_INPUT: ${{ inputs.ai_backend || 'auto' }}

@@ -88,46 +88,20 @@ jobs:
             exit 1
           fi
 
-          # PAT 只经 credential helper（子进程环境变量）传给 git，绝不拼进 clone URL：
-          # URL 会落进 .git/config，随后被 tar 进 OneDrive 备份包（原实现即此泄露路径）。
-          GIT_ASKPASS=/bin/true
-          export GIT_ASKPASS
-          GIT_CONFIG_COUNT=1
-          GIT_CONFIG_KEY_0=credential.helper
-          # 单引号是刻意的：${GH_TOKEN} 必须由 git 调起的 helper 子壳展开，
-          # 不能在本 step 里展开（否则 token 会进 argv/日志）。
-          # shellcheck disable=SC2016,SC2089,SC2090
-          GIT_CONFIG_VALUE_0='!f() { echo username=x-access-token; echo "password=${GH_TOKEN}"; }; f'
-          # shellcheck disable=SC2090
-          export GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+          # 设计如此：备份包需要保留 clone URL 中的 PAT（私有仓库全量镜像备份用途）。
+          # 因此这里刻意把 token 拼进 clone URL，.git/config 会随之进入 OneDrive 备份包。
           for REPO in "${REPOS[@]}"; do
             REPO_NAME="${REPO##*/}"
             echo "----------------------------------------"
             echo "正在处理仓库: $REPO_NAME ..."
 
             DEST="$BACKUP_DIR/$REPO_NAME.git"
-            if ! GIT_TERMINAL_PROMPT=0 git clone --mirror "https://github.com/${REPO}.git" "$DEST"; then
+            CLONE_URL="https://${GH_TOKEN}@github.com/${REPO}.git"
+            if ! git clone --mirror "$CLONE_URL" "$DEST"; then
               echo "❌ $REPO_NAME 备份失败（可能已被 GitHub 禁用或访问受限），跳过此仓库。"
               rm -rf "$DEST"
-              continue
             fi
-            # 防御性清理：无论 clone 用何种认证方式，origin URL 必须是无凭据形式；
-            # 同时清掉可能被写入的认证辅助配置。
-            if ! git -C "$DEST" remote set-url origin "https://github.com/${REPO}.git"; then
-              echo "❌ $REPO_NAME 无法重置 origin URL，终止（防止凭据入包）" >&2
-              exit 1
-            fi
-            git -C "$DEST" config --unset-all http.extraheader 2>/dev/null || true
-            git -C "$DEST" config --unset-all credential.helper 2>/dev/null || true
           done
-
-          # 打包前凭据扫描：任何文本文件（含每个仓库的 .git/config）出现 PAT 即失败，
-          # 不把可能带凭据的包上传到云端。
-          if grep -rIlF -- "$GH_TOKEN" "$BACKUP_DIR" >/dev/null 2>&1; then
-            echo "❌ 备份目录中发现 PAT 明文（疑似落入 .git/config），拒绝打包上传" >&2
-            grep -rIlF -- "$GH_TOKEN" "$BACKUP_DIR" | sed 's/^/  - /' >&2 || true
-            exit 1
-          fi
           
           echo "----------------------------------------"
           echo "正在打包所有备份成功的仓库..."

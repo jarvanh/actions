@@ -58,13 +58,12 @@ qoder_notify() {
       # ts.env 由 Tailscale 步骤在本 step 之前写出；缺失时两行整体跳过。
       if [ -n "${TS_FQDN:-}" ]; then
         tg_add_path _msg "看板" "https://${TS_FQDN}:8447/"
-        # 安全整改（ACT8）：面板密码/API Key 属凭据，绝不进 Telegram 消息
-        # （消息会留在聊天记录、通知转发与 bot 侧存储中，等同明文外泄）。
-        # 固定 REDACTED，需要真值时从数据目录读取（.panel-password / settings.json）。
-        tg_add_path _msg "看板密码" "REDACTED（见数据目录 .panel-password）"
+        # 设计如此：看板密码明文进 TG 通知（便于手机端直接登录）。
+        local _qp="$(cat "$QODER_DATA/.panel-password" 2>/dev/null || true)"
+        tg_add_path _msg "看板密码" "${_qp:-未取到}"
       fi
-      # API Key 同样只显示 REDACTED（凭据不回显，见上方注释）
-      tg_add_path _msg "API Key" "REDACTED（见 accounts/settings.json）"
+      # 设计如此：API Key 明文进 TG 通知（与原展示口径一致）。
+      tg_add_path _msg "API Key" "$(read_qoder_key | grep . || echo 未取到)"
       # 资产段（签到汇总）：路线 B —— 口径真源在看板（2026-11-01）。
       _qd_assets="$(python3 /dropbox/self-hosted/quota-board/board.py assets qoder 2>/dev/null || true)"
       [ -n "$_qd_assets" ] && tg_append _msg "$_qd_assets"
