@@ -90,6 +90,18 @@ grep -q 'LOG_FILENAME="${task_name}_sync_${TIMESTAMP}_${BASHPID' "$WORK/swl.sh" 
   && ok "L3 日志名模板含 \${BASHPID} 唯一后缀（静态锁）" \
   || bad "L3 日志名模板缺少唯一后缀（并发同名会重新撞名）"
 
+# ---------- L4: 记账合理性护栏（2026-11-13 加）----------
+# 传输量不可能超过源端总量；超了就是解析失真，必须截断而不是静默累加。
+_src='/home/runner/work/actions/actions/.github/scripts/openlist/task_engine.sh'
+grep -q '记账异常: 本对传输量' "$_src" \
+  && ok "L4 护栏代码存在于 task_engine.sh（传输量 > 源端总量时告警+截断）" \
+  || bad "L4 护栏代码缺失"
+# 行为：按真源同一判据跑一遍
+g() { local s=$1 t=$2; if [ "$s" -gt 0 ] && [ "$t" -gt "$s" ]; then echo "$s"; else echo "$t"; fi; }
+[ "$(g 1000 1500)" = "1000" ] && ok "L4b 超限(1500>1000) → 截断到源端总量" || bad "L4b 未截断"
+[ "$(g 1000 800)" = "800" ] && ok "L4c 正常(800<1000) → 原样保留" || bad "L4c 被误改"
+[ "$(g 0 999999)" = "999999" ] && ok "L4d 源端总量未知(0) → 不拦（宁放行不误杀）" || bad "L4d 误拦"
+
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -1981,6 +1981,20 @@ _sync_task_impl() {
     # 实测 wopan175 那对明明传了 10 个文件却回传 **0 B**，整轮合计被低估一半
     # （父级"并行同步对完成: 传输 X"直接影响趋势样本与工期估算）。
     SYNC_TRANSFERRED_BYTES=$(( ${total_transferred:-0} + ${SYNC_TRANSFERRED_BYTES:-0} ))
+    # ===== 记账合理性护栏（2026-11-13 加，run 43173429624 实证）=====
+    # 一对的"传输量"物理上不可能超过该对**源端总量**（同一份数据最多传一遍，
+    #   重传只会更少）。现场: 第 13 对回传 834.004 GiB / 34.4min ≈ 410 MiB/s，
+    #   而同期 rclone 自报只有 1.4–2.9 MiB/s，该对结束前的真实进度行是
+    #   `3.430 GiB / 14.902 GiB, 23%` ⇒ 明显失真。根因是并行 worker 日志撞名
+    #   导致取到别人的进度行（已由 LOG_FILENAME 加 BASHPID 修复）。
+    # 这道护栏是**第二道防线**: 将来若出现别的解析失真（rclone 输出格式变更、
+    #   日志复用、多 worker 竞争），假数字也不会静默流进趋势与工期估算。
+    # 触发时: 打警告 + 截断到源端总量（宁可用上界，也不把虚高传下去）。
+    if [ "${source_size_bytes:-0}" -gt 0 ] \
+       && [ "${SYNC_TRANSFERRED_BYTES:-0}" -gt "${source_size_bytes}" ]; then
+      echo "⚠️ 记账异常: 本对传输量 $(format_bytes "$SYNC_TRANSFERRED_BYTES") 超过源端总量 $(format_bytes "$source_size_bytes") → 截断到源端总量（疑似日志解析失真，查 LOG_FILENAME 唯一性与进度行格式）"
+      SYNC_TRANSFERRED_BYTES="$source_size_bytes"
+    fi
     AUTO_SPLIT_INFO=""
     if [ "$SYNC_FAILED" = "0" ] && [ "${SYNC_FAILED_BATCH:-0}" != "1" ] \
        && [ "${_TASK_SKIP_DAYS:-0}" -gt 0 ]; then
