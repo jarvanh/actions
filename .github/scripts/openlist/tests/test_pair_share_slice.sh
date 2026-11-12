@@ -242,6 +242,36 @@ OPENLIST_PAIR_DEADLINE_EPOCH=$(( OPENLIST_SYNC_DEADLINE_EPOCH + 5000 ))
   || bad "H3 实得 $(_subdir_reserve_seconds)"
 unset OPENLIST_PAIR_DEADLINE_EPOCH OPENLIST_SYNC_DEADLINE_EPOCH
 
+# ================= I. 份额不足以开工 ⇒ 本轮不分发（2026-11-12 加）=================
+# 现场（run 43125112722）: 轮末出现「份额 1min（需服务 2 个）」的对仍被分发，
+#   而 sync_budget_stop 要求剩余 ≥600s 才开新单元 ⇒ 该 worker 一个单元开不了，
+#   占槽位空转 7.7 分钟，记一条 truncated · 0 B（"没开工"却被记成"传不动"）。
+# 判据抽成 _pair_share_usable 以便确定性测试:
+OPENLIST_PAIR_MIN_USABLE_SECONDS=300
+[ "$(_pair_share_usable 60; echo $?)" = "1" ] \
+  && ok "I1 份额 60s < 300s 下限 → 判不可用（本轮不分发）" \
+  || bad "I1 60s 被判可用"
+[ "$(_pair_share_usable 300; echo $?)" = "0" ] \
+  && ok "I2 份额 = 下限 300s → 判可用（边界含等号）" \
+  || bad "I2 300s 被判不可用"
+[ "$(_pair_share_usable 1200; echo $?)" = "0" ] \
+  && ok "I3 份额 20min → 可用" || bad "I3 1200s 被判不可用"
+# 空输入（无预算锚点: 调试/还原/串行）必须视为可用 —— 行为不能被改坏
+[ "$(_pair_share_usable ''; echo $?)" = "0" ] \
+  && ok "I4 空份额（无锚点）→ 可用（调试/还原行为不变）" \
+  || bad "I4 空份额被判不可用"
+[ "$(_pair_share_usable 'abc'; echo $?)" = "0" ] \
+  && ok "I5 非法份额值 → 可用（不误杀）" || bad "I5 非法值被判不可用"
+# 显式调下限生效
+OPENLIST_PAIR_MIN_USABLE_SECONDS=90
+[ "$(_pair_share_usable 120; echo $?)" = "0" ] \
+  && ok "I6 下限可调（90s 时 120s 算可用）" || bad "I6 下限调节未生效"
+OPENLIST_PAIR_MIN_USABLE_SECONDS=0
+[ "$(_pair_share_usable 10; echo $?)" = "1" ] \
+  && ok "I7 下限设 0（非法）→ 回落默认 300s，故 10s 判不可用（不静默关闭闸门）" \
+  || bad "I7 下限 0 时 10s 被判可用（闸门被静默关闭）"
+unset OPENLIST_PAIR_MIN_USABLE_SECONDS
+
 echo "-----"
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

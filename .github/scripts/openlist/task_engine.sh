@@ -323,6 +323,22 @@ _run_registry_pairs_parallel() {
       done
       _need=$(( 1 + _running + _unstarted ))
       _share=$(_pair_share_seconds "$_need")
+      # ===== 份额不足可用下限 ⇒ 本轮不分发（2026-11-12 加，run 43125112722 实证）=====
+      # 现场: 轮末算出「份额 1min（需服务 2 个）」的对仍被分发出去 —— 而
+      #   sync_budget_stop 要求「剩余 ≥ OPENLIST_SYNC_MIN_SLICE_SECONDS(600s) 才开新单元」
+      #   ⇒ 该 worker 一个单元都开不了，却占着槽位空转 **7.7 分钟**，最后记一条
+      #   `truncated · 0 B`（看着像"传不动"，其实是"根本没开工"）。
+      # 做法: 份额 < OPENLIST_PAIR_MIN_USABLE_SECONDS(默认 300s) 时**不分发**，
+      #   并把已置的 _started/_busy_be 回滚 ⇒ 游标停在本对，下轮优先进它。
+      #   比"分发后空转"更省时间，也消除了"从未开工却被记为交棒"的假象。
+      local _min_usable="${OPENLIST_PAIR_MIN_USABLE_SECONDS:-300}"
+      [[ "$_min_usable" =~ ^[0-9]+$ ]] || _min_usable=300
+      if [ -n "$_share" ] && ! _pair_share_usable "$_share"; then
+        echo "⏳ 第 $((idx + 1))/${n} 个同步对的可用份额仅 ${_share}s（< ${_min_usable}s 下限）→ 本轮不分发，留给下轮优先（避免开局即到点空转）"
+        unset "_started[$_pick]" "_busy_be[$_pick_be]"
+        SYNC_TIME_EXHAUSTED=1
+        break
+      fi
       if [[ "$_share" =~ ^[0-9]+$ ]] && [ "$_share" -gt 0 ]; then
         _pd_epoch=$(( $(date +%s) + _share ))
         # 不得越过平台硬顶（保留收尾预留，与 sync_hard_limit_stop 同口径）
@@ -814,6 +830,22 @@ _pair_share_seconds() {
   [ "$_share" -lt "$_min" ] && _share="$_min"
   [ "$_share" -gt "$_usable" ] && _share="$_usable"
   echo "$_share"
+}
+
+# ===== 份额是否足以开工（2026-11-12 加）=====
+# 语义: 份额 ≥ OPENLIST_PAIR_MIN_USABLE_SECONDS（默认 300s）才算"能干活"。
+# 为什么需要: sync_budget_stop 要求「剩余 ≥ OPENLIST_SYNC_MIN_SLICE_SECONDS(600s)
+#   才开新单元」。轮末算出的份额可能只有 60s（usable/need 的结果）——
+#   这种对分发出去后**一个单元都开不了**，却占槽位空转（run 43125112722 实测
+#   7.7 分钟），最后记一条 `truncated · 0 B`，看着像"传不动"其实是"没开工"。
+#   故 < 下限时本轮不分发，把游标留在这里让下轮优先服务它。
+# 空输入（无预算锚点：调试/还原/串行）⇒ 视为可用，行为不变。
+_pair_share_usable() {
+  local _share="${1:-}" _min="${OPENLIST_PAIR_MIN_USABLE_SECONDS:-300}"
+  [[ "$_min" =~ ^[0-9]+$ ]] && [ "$_min" -gt 0 ] || _min=300
+  [ -n "$_share" ] || return 0
+  [[ "$_share" =~ ^[0-9]+$ ]] || return 0
+  [ "$_share" -ge "$_min" ]
 }
 
 # ===== 并行同步对的收尾状态（2026-11-10 抽函数）=====

@@ -87,7 +87,10 @@ reset_case() {
   SYNC_TIME_EXHAUSTED=0
 }
 cursor_now() { sed -n 's/.*"cursor"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' "$WORK/task_rotation.json" 2>/dev/null | head -1; }
-starts() { grep -c '^START ' "$REC" 2>/dev/null || echo 0; }
+# ⚠️ 不能写 `grep -c … || echo 0`: grep -c 无匹配时**已经打印 0 并返回 1**，
+#   `|| echo 0` 会再追加一个 0 ⇒ 变量变成 "0\n0"，整数比较与等值比较都会失败。
+#   此前计数恒 >0 时没暴露，一旦场景断言"0 个"就炸（3d 加进来时实测）。
+starts() { local n; n=$(grep -c '^START ' "$REC" 2>/dev/null || true); printf '%s' "${n:-0}"; }
 
 # --- 1. 默认串行: 不发生重叠 ---
 reset_case
@@ -107,9 +110,13 @@ run_all_tasks >/dev/null 2>&1
   && ok "2c 确有跨后端并发（观察到两个同步对同时在跑）" || bad "2c: 未观察到并发"
 
 # --- 3. 预算将尽: 不再分发；游标指向本轮未启动的第一个同步对 ---
+# 注: 这里显式把「份额可用下限」关到 1s，**单独**验证预算闸（sync_budget_stop）。
+#   否则 601s 的 deadline 会让有效份额只剩 60s（_budget_slice_seconds 扣掉尾部预留），
+#   被"份额不足不下发"闸先拦掉，就测不到预算闸本身了（两条闸分别锁定，见 3d）。
 reset_case
 OPENLIST_PAIR_PARALLEL=2
 OPENLIST_SYNC_MIN_SLICE_SECONDS=600
+OPENLIST_PAIR_MIN_USABLE_SECONDS=1
 OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 601 ))   # 首轮可分发，随后即到点
 run_all_tasks >/dev/null 2>&1
 _n=$(starts)
@@ -129,6 +136,21 @@ else
   [ "$_cur" = "$_expect" ] && ok "3c 游标指向未启动的第一个同步对（${_cur}）" \
     || bad "3c: 期望游标 ${_expect} 实得 ${_cur}"
 fi
+
+# --- 3d. 有效份额不足可用下限 ⇒ 本轮一个都不分发、游标留在起点 ---
+# 现场（run 43125112722）: 轮末「份额 1min」的对被分发出去，却因
+#   sync_budget_stop（需 ≥600s 才开新单元）一个单元都开不了，占槽位空转 7.7 分钟，
+#   最后记 `truncated · 0 B` —— 看着像"传不动"，其实"没开工"。
+#   现语义: 份额 < 300s 直接不分发，游标留在本对，下轮优先。
+reset_case
+OPENLIST_PAIR_PARALLEL=2
+unset OPENLIST_PAIR_MIN_USABLE_SECONDS
+OPENLIST_SYNC_MIN_SLICE_SECONDS=600
+OPENLIST_SYNC_DEADLINE_EPOCH=$(( $(date +%s) + 601 ))   # 有效份额仅 ~60s
+run_all_tasks >/dev/null 2>&1
+_n=$(starts)
+[ "$_n" = "0" ] && ok "3d 份额 < 300s → 本轮 0 个分发（不再空转）" || bad "3d: 仍分发 ${_n} 个"
+[ "$(cursor_now)" = "0" ] && ok "3d2 游标留在起点 0（下轮优先服务它）" || bad "3d2 游标=$(cursor_now)"
 
 # --- 4. 完成状态与字节合并 ---
 reset_case
