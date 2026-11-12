@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """订阅判定指标回退的自检（`speedtest_common.resolve_subscription_metric`）。
 
-为什么单独一个文件：这条判据决定「订阅里最终有几个节点」，而它出过一次真实事故——
-run 34859505000 里 19 个测过的节点**下行全部达标**，订阅里却**只有 1 个节点**。
+为什么单独一个文件：这条判据决定「订阅里最终有几个节点」，而它出过两次真实事故：
 
-**事故根因**：回退条件原来是「主指标达标数 < `min_nodes`」，而 `min_nodes` 默认 1
-⇒ 只要主指标有 1 个达标就**永不回退**。`min_nodes` 的本意是「不足则不上传订阅」，
-它不该同时充当「是否换指标」的门槛（详见 speedtest_common 里的注释）。
+1. run 34859505000：19 个节点**下行全部达标**，订阅里却**只有 1 个节点**。
+   根因：回退条件曾是「主指标达标数 < `min_nodes`」，而当时 `min_nodes` 默认 1
+   ⇒ 主指标有 1 个就永不回退。
+2. run 42953380754（2026-11-11）：真实上传修好后 `primary=5`、`secondary` 近 300，
+   订阅却静默停更。根因：解耦出的回退门槛（3）落在 `min_nodes`（10）之下，
+   形成 [3,10) 盲区——`5 >= 3` 不回退、`5 < 10` 不上传，两条路都不走。
 
-现在的判据：**主指标达标数 < 回退门槛**（`PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES`，
-默认 3）**且另一指标更多**时才改判另一指标。门槛单列、与 `min_nodes` 彻底脱钩
-（2026-09-17 从倍率制改回计数制并按此解耦）。
+现在的判据（2026-11-12 合并为**单一门槛** `min_nodes`）：
+**主指标凑不够（primary < min_nodes）且另一指标能凑够（secondary >= min_nodes）**才改判。
+``PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES`` 已不再读取。
 
 第 7–10 组守**另一条更隐蔽的路**——「可导出配置」的取值来源。2026-09-16 的编排轮
 `35116972319` 里 206 个节点实测有速度（最高上传 245 Mbps），订阅却判「达标不足 1 个」：
@@ -58,65 +60,86 @@ def main():
     pol = C.resolve_subscription_policy({})
 
     check(pol['metric'] == 'upload', '默认判定指标是 upload')
-    check(pol['metric_fallback_min_nodes'] == 3,
-          f"默认回退门槛 3（实际 {pol['metric_fallback_min_nodes']}）")
+    check('metric_fallback_min_nodes' not in pol,
+          f"策略里不再有独立回退门槛（实际键：{sorted(pol)}）")
     check(pol['min_nodes'] == 10,
           f'默认最少节点数 10（实际 {pol["min_nodes"]}；2026-10-19 主人定：'
           '源枯竭时 qualified=1 也照旧上传，订阅里只剩一个节点不如不更新）')
 
     m, q, fb = C.resolve_subscription_metric(results, pol)
-    check(m == 'download', f'上行只有 1 个达标（< 3）⇒ 回退到 download（实际 {m}）')
+    check(m == 'download', f'上行只有 1 个达标（< 10）⇒ 回退到 download（实际 {m}）')
     check(q == 19, f'回退后达标 19 个，而不是 1 个（实际 {q}）')
     check(fb is True, '标记为已回退（fallback=True）')
     bundle = C.build_subscription_bundle(results, pol)
     check(bundle['qualified'] == 19 and bool(bundle['text']),
           f'订阅文本按 19 个节点生成（实际 {bundle["qualified"]}）')
 
-    print('== 2. 反向：主指标达标数 ≥ 门槛 ⇒ 维持配置的主指标 ==')
+    print('== 2. 反向：主指标够一份订阅 ⇒ 维持配置的主指标 ==')
     up_good = [node(50, 5) for _ in range(10)]
     m2, q2, fb2 = C.resolve_subscription_metric(up_good, pol)
-    check((m2, fb2) == ('upload', False), f'上行 10（≥ 3）/ 下行 0 ⇒ 维持 upload（实际 {m2}/{fb2}）')
+    check((m2, fb2) == ('upload', False), f'上行 10（≥ min_nodes）/ 下行 0 ⇒ 维持 upload（实际 {m2}/{fb2}）')
     check(q2 == 10, f'达标数取主指标（实际 {q2}）')
 
-    print('== 3. 门槛之上即使另一指标更多也不换（尊重配置的主指标）==')
-    close = [node(50, 5)] * 3 + [node(1, 50)] * 10
-    m3, q3, fb3 = C.resolve_subscription_metric(close, pol)
-    check((m3, fb3) == ('upload', False),
-          f'上行 3（= 门槛，未「小于」）/ 下行 10 ⇒ 维持 upload（实际 {m3}/{fb3}）')
-    check(q3 == 3, f'达标数仍是主指标的 3（实际 {q3}）')
-    pol1 = dict(pol, metric_fallback_min_nodes=4)
-    m5, _q5, fb5 = C.resolve_subscription_metric(close, pol1)
-    check((m5, fb5) == ('download', True),
-          f'门槛提到 4 后 3 < 4 ⇒ 回退 download（实际 {m5}）')
+    print('== 3. 盲区回归（run 42953380754）：primary 落在 (0, min_nodes) 也要能回退 ==')
+    # 真实场景：真实上传修好后主指标只有 5 个达标，下行近 300 —— 旧实现（门槛 3）静默停更。
+    blind = [node(50, 1)] * 5 + [node(1, 50)] * 50
+    m3, q3, fb3 = C.resolve_subscription_metric(blind, pol)
+    check((m3, fb3) == ('download', True),
+          f'primary=5 < 10 且 secondary=50 ≥ 10 ⇒ 回退 download（实际 {m3}/{fb3}）')
+    check(q3 == 50, f'回退后达标 50（实际 {q3}）')
+    b3 = C.build_subscription_bundle(blind, pol)
+    check(bool(b3['text']) and b3['qualified'] == 50,
+          f'盲区场景下订阅必须产出（实际 qualified={b3["qualified"]}, text空={not b3["text"].strip()}）')
 
-    print('== 3b. 门槛达标但另一指标更少 ⇒ 绝不回退（换了反而更差）==')
-    fewer = [node(50, 5)] * 2 + [node(1, 50)] * 1
-    pol2 = dict(pol, metric_fallback_min_nodes=5)
-    m7, q7, fb7 = C.resolve_subscription_metric(fewer, pol2)
-    check((m7, fb7) == ('upload', False),
-          f'上行 2 < 5 但下行只有 1 ⇒ 维持 upload（实际 {m7}/{fb7}）')
-    check(q7 == 2, f'达标数取主指标（实际 {q7}）')
+    print('== 3b. 两边都不够 ⇒ 不回退、不上传（换指标也改变不了结果）==')
+    both_short = [node(50, 1)] * 9 + [node(1, 50)] * 9
+    m4, q4, fb4 = C.resolve_subscription_metric(both_short, pol)
+    check((m4, fb4) == ('upload', False),
+          f'primary=9、secondary=9 均 < 10 ⇒ 维持 upload 且不回退（实际 {m4}/{fb4}）')
+    check(q4 == 9 and C.build_subscription_bundle(both_short, pol)['text'] == '',
+          '达标 9 < 10 ⇒ 不上传（实际文本非空则说明误回退）')
+
+    print('== 3c. 另一指标能凑够才换：secondary 恰等于 min_nodes 是允许的 ==')
+    edge = [node(50, 1)] * 0 + [node(1, 50)] * 10
+    m5, q5, fb5 = C.resolve_subscription_metric(edge, pol)
+    check((m5, q5, fb5) == ('download', 10, True),
+          f'primary=0、secondary=10 = min_nodes ⇒ 回退并上传（实际 {m5}/{q5}/{fb5}）')
 
     print('== 4. 全不达标 ⇒ 不上传（min_nodes 仍守着「不足不上传」）==')
     zero = [node(0, 0)] * 5
-    m4, q4, fb4 = C.resolve_subscription_metric(zero, pol)
-    check(q4 == 0, f'达标 0（实际 {q4}）')
+    m6, q6, fb6 = C.resolve_subscription_metric(zero, pol)
+    check(q6 == 0, f'达标 0（实际 {q6}）')
     check(C.build_subscription_bundle(zero, pol)['text'] == '', '订阅文本为空 ⇒ 跳过上传')
-    check(fb4 is False, '无达标时不做无意义的回退')
+    check(fb6 is False, '无达标时不做无意义的回退')
 
-    print('== 5. min_nodes 回归本意：只管「传不传」，不管「换不换」==')
-    # min_nodes=5 时：达标 3 个 < 5 ⇒ 不上传；回退判据仍只看门槛（默认 3，3 不小于 3）⇒ 维持 upload
+    print('== 5. 单一门槛：min_nodes 同时决定「换不换」与「传不传」==')
+    # min_nodes=5：primary=3 < 5 且 secondary=10 ≥ 5 ⇒ 回退并上传（旧语义会停更）
+    close = [node(50, 5)] * 3 + [node(1, 50)] * 10
     pol5 = dict(pol, min_nodes=5)
+    m7, q7, fb7 = C.resolve_subscription_metric(close, pol5)
+    check((m7, q7, fb7) == ('download', 10, True),
+          f'min_nodes=5 时 primary=3 < 5 且 secondary=10 ≥ 5 ⇒ 回退（实际 {m7}/{q7}/{fb7}）')
     b5 = C.build_subscription_bundle(close, pol5)
-    check(b5['text'] == '', f'达标 3 < min_nodes 5 ⇒ 不上传（实际 {b5["qualified"]}）')
-    m6, q6, _ = C.resolve_subscription_metric(close, pol5)
-    check(m6 == 'upload', 'min_nodes 提高不改变回退判据（仍是 upload）')
+    check(bool(b5['text']) and b5['qualified'] == 10,
+          f'min_nodes=5 时按 download 上传 10 个（实际 {b5["qualified"]}）')
+    # 同一批数据把 min_nodes 抬到 11：primary=3 < 11，secondary=10 < 11 ⇒ 不回退、不上传
+    pol11 = dict(pol, min_nodes=11)
+    m8, q8, fb8 = C.resolve_subscription_metric(close, pol11)
+    check((m8, fb8) == ('upload', False),
+          f'min_nodes=11 时 secondary=10 < 11 ⇒ 不回退（实际 {m8}/{fb8}）')
 
-    print('== 6. 配置健壮性 ==')
-    for raw, want in (('abc', 3), ('', 3), ('0', 1), ('-3', 1), ('7', 7)):
-        p = C.resolve_subscription_policy({'PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES': raw})
-        check(p['metric_fallback_min_nodes'] == want,
-              f'门槛 {raw!r} → {want}（实际 {p["metric_fallback_min_nodes"]}）')
+    print('== 6. 配置健壮性：旧回退门槛 env 不再生效 ==')
+    p_legacy = C.resolve_subscription_policy({
+        'PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES': '99',
+        'PROXY_SPEEDTEST_MIN_NODES': '7',
+    })
+    check('metric_fallback_min_nodes' not in p_legacy,
+          '旧配置项不再进入策略字典')
+    check(p_legacy['min_nodes'] == 7, f'只认 MIN_NODES（实际 {p_legacy["min_nodes"]}）')
+    # 非法 min_nodes 仍按老规矩回默认，不因写错而静默改口径
+    for raw, want in (('abc', 10), ('', 10), ('0', 1), ('-3', 1), ('7', 7)):
+        p = C.resolve_subscription_policy({'PROXY_SPEEDTEST_MIN_NODES': raw})
+        check(p['min_nodes'] == want, f'min_nodes {raw!r} → {want}（实际 {p["min_nodes"]}）')
 
     print('== 7. 可导出配置回落 proxy_obj（run 35116972319：206 个达标节点被判 0）==')
     # 编排轮形态：节点由 gistnodes 经 provider 直接喂进来，source_mapping 只有 4 条 ⇒

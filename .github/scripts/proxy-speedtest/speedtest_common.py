@@ -159,14 +159,15 @@ DEFAULT_MIN_MEGABIT = 10
 #   订阅，订阅里孤零零一个节点不如不更新——保留上一份多节点订阅更可用。
 DEFAULT_MIN_NODES = 10
 DEFAULT_SPEED_METRIC = 'upload'
-# 判定指标回退的门槛（达标数）：**主指标达标数 < 该值**才改判另一指标。
-# 为什么是独立配置而不是复用 min_nodes（2026-09-17 改回并解耦）：
-#   min_nodes 语义是「不足则不上传订阅」，默认 10（源枯竭时 1 个节点不如不传，见上）。
-#   拿它当回退门槛 ⇒ 只要主指标有 1 个达标就永不回退，正好退回 run 34859505000 的事故
-#   （19 个节点下行全达标、上行只 1 个，却因 1 >= 1 不回退 ⇒ 订阅里只剩 1 个节点）。
-#   两个语义必须分开：回退门槛单列，不受 min_nodes 提高影响。
-#   默认 3 是「主指标只剩零星几个时才算不可信」：既能触发回退，又不至于有 1 个就换。
-DEFAULT_METRIC_FALLBACK_MIN_NODES = 3
+# ⚠️ 判定指标回退**没有独立门槛**（2026-11-12 合并为单一 `min_nodes`）：
+# 回退判据直接复用「一份订阅最少要几个节点」——
+#   主指标凑不够（primary < min_nodes）且另一指标能凑够（secondary >= min_nodes）才改判。
+# 旧实现单列 `PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES`（默认 3），与 `min_nodes=10`
+# 之间留下 [3, 10) 盲区：primary=5 时既不满足回退（5 >= 3），又凑不够上传（5 < 10）
+# ⇒ 订阅静默停更（实例 run 42953380754：真实上传修好后 primary=5，gist 直接跳过）。
+# 两个门槛本质上问的是同一件事（「这点节点够不够用」），合并后不存在不一致的可能。
+# 旧 env 仍可存在但**不再读取**，避免历史配置里残留的 3 被误当成有效门槛。
+
 # 判定指标 → build_mihomo_yaml_text 的 speedtest_mode（push-only = 按上行判定）
 METRIC_MODES = {'upload': 'push-only', 'download': 'download'}
 METRIC_LABELS = {'upload': '上传', 'download': '下载'}
@@ -289,10 +290,8 @@ def resolve_subscription_policy(env=None):
       PROXY_SPEEDTEST_SPEED_METRIC  判定指标：upload（默认，按上行）/ download（按下行）
       PROXY_SPEEDTEST_MIN_NODES     上传订阅的最少节点数，默认 10（2026-10-19 主人定：
                                     源枯竭时 qualified=1 也照旧上传，订阅里只剩一个节点
-                                    不如不更新）
-      PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES
-                                    判定指标回退的达标数门槛，默认 3：**主指标达标数 < 该值**
-                                    且另一指标达标数更多时，改判另一指标
+                                    不如不更新）。**同时充当判定指标的回退门槛**
+                                    （2026-11-12 合并，见 resolve_subscription_metric）
 
     非法值一律退回默认值（不因配置写错而静默改变口径）。
     """
@@ -304,9 +303,6 @@ def resolve_subscription_policy(env=None):
         'min_megabit': _env_int(env, 'PROXY_SPEEDTEST_MIN_MEGABIT', DEFAULT_MIN_MEGABIT, 0),
         'min_nodes': _env_int(env, 'PROXY_SPEEDTEST_MIN_NODES', DEFAULT_MIN_NODES, 1),
         'metric': metric,
-        'metric_fallback_min_nodes': _env_int(
-            env, 'PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES',
-            DEFAULT_METRIC_FALLBACK_MIN_NODES, 1),
     }
 
 
@@ -376,36 +372,40 @@ def count_qualified_nodes(results: list, metric: str, min_megabit):
 
 
 def resolve_subscription_metric(results: list, policy: dict):
-    """判定指标选择：**主指标达标数 < 门槛**且另一指标达标数更多时才改判另一指标。
+    """判定指标选择：**主指标凑不够一份订阅时，若另一指标能凑够就改判**（单一门槛）。
 
-    例：默认按 upload 判定、门槛 3；上行只达标 1 个、下行达标 19 个 → 改用 download。
-    上行达标 5 个（≥ 门槛）→ 维持 upload，哪怕下行更多——门槛之上说明主指标是可用的。
+    判据（2026-11-12 合并后只剩这一条，缺一不可）：
+      1. `primary < min_nodes`    —— 主指标达标数凑不够「最少节点数」；
+      2. `secondary >= min_nodes` —— 另一指标**确实能凑够**一份订阅。
 
-    判据共两条，缺一不可：
-      1. `primary < metric_fallback_min_nodes`（主指标达标数 < 门槛，默认 3）
-      2. `secondary > primary`（另一指标确实更多，避免「换了反而更少」）
+    只有同时满足才改判。这样"换指标"必须改变结果（能出订阅），不会出现
+    「换过去也不够、只是把 skip 原因换个说法」的空转。
 
-    ⚠️ **门槛不能复用 `min_nodes`**（2026-09-14 事故 + 2026-09-17 解耦为独立配置）。
-    `min_nodes` 的语义是「不足则不上传订阅」、默认 10（源枯竭时 1 个节点不如不传）；
-    一旦拿它当回退门槛，就会变成
-    「主指标有 1 个达标就永不回退」——实测 run 34859505000：19 个节点里上行只有 1 个测得出
-    （公开节点上行被限），下行 19 个全部达标，却因 `1 >= 1` 不回退 ⇒ **订阅里只剩 1 个节点**。
-    所以回退门槛单列 `PROXY_SPEEDTEST_METRIC_FALLBACK_MIN_NODES`（默认 3），
-    与「传不传订阅」彻底脱钩：下限设小了永不回退、设大了又变成「达标不足就不上传」，
-    两个语义绑在一起怎么调都是错的。
+    例（min_nodes=10）：
+      * primary=1、secondary=19 → 改判 download，订阅 19 个 ✅
+      * primary=5、secondary=50 → 改判 download，订阅 50 个 ✅（旧实现会静默停更）
+      * primary=9、secondary=9  → 维持 upload，达标 9 < 10 ⇒ 不上传（两边都不够，正确）
+      * primary=10、secondary=50 → 维持 upload，订阅 10 个（主指标够用就不换）
+
+    ⚠️ 历史（为什么曾经是两个门槛）：2026-09-17 曾把回退门槛与 `min_nodes` 解耦，
+    理由是当时 `min_nodes=1`，绑定后「主指标有 1 个就不回退」⇒ run 34859505000
+    订阅里只剩 1 个节点。但 2026-10-19 起 `min_nodes` 默认已是 10，解耦反而制造了
+    `[3, 10)` 盲区：`primary=5` 既不满足旧门槛 3、又凑不够 10 ⇒ 回退与上传双双不触发，
+    订阅静默停更（实例 run 42953380754）。两个门槛问的本来就是同一件事，
+    合并为 `min_nodes` 后不再有不一致的可能。
     """
     metric = policy.get('metric') or DEFAULT_SPEED_METRIC
     other = 'download' if metric == 'upload' else 'upload'
     min_megabit = policy.get('min_megabit', DEFAULT_MIN_MEGABIT)
-    threshold = policy.get('metric_fallback_min_nodes', DEFAULT_METRIC_FALLBACK_MIN_NODES)
+    min_nodes = policy.get('min_nodes', DEFAULT_MIN_NODES)
     primary = count_qualified_nodes(results, metric, min_megabit)
     secondary = count_qualified_nodes(results, other, min_megabit)
-    if primary < threshold and secondary > primary:
+    if primary < min_nodes and secondary >= min_nodes:
         log_progress('subscription_metric_fallback', from_metric=metric, to_metric=other,
-                     primary=primary, secondary=secondary, threshold=threshold)
+                     primary=primary, secondary=secondary, min_nodes=min_nodes)
         return other, secondary, True
     log_progress('subscription_metric_kept', metric=metric, primary=primary,
-                 secondary=secondary, threshold=threshold)
+                 secondary=secondary, min_nodes=min_nodes)
     return metric, primary, False
 
 
