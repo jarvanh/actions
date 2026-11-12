@@ -591,7 +591,8 @@ def check():
         for i, l in enumerate(open(p, encoding="utf-8", errors="replace").read().split("\n"), 1):
             if l.strip().startswith("#") or not CALL_LINE.search(l):
                 continue
-            if "UTC" in l:
+            # 词边界匹配：避免把 SYNC_OUTCOME 这类标识符里的 "UTC" 子串误报
+            if re.search(r"\bUTC\b", l):
                 bad.append(f"{p}:{i}: {l.strip()[:80]}")
     add(15, "通知里不直出 UTC", bad)
 

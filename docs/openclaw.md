@@ -407,71 +407,35 @@ mv ~/.openclaw/state/openclaw.sqlite{,.state-bak-$(date +%s)}   # 含 -wal/-shm
 openclaw gateway restart
 ```
 
-### 通知清单
+### 通知
 
-| 通知 | 时机 | 内容 |
-|---|---|---|
-| `🟢 OpenClaw Runner 已就绪` | Tailscale SSH 步骤成功且 AI 网关已起 | 按套分节 + 树形条目：🔐 SSH（命令 / 备用 IP / 文件管理）、🖥️ RustDesk（直连 `FQDN:21118`）、🌐 出口网络（出口 IP / ISP / ASN / 位置）、🛰️ 出口节点（状态 / 三种批准方式 / API）、🤖 AI 网关（后端 + 回退原因） |
-| `🚨 OpenClaw 自愈失败` | `Run OpenClaw` 步骤失败 | 步骤、Run ID、失败阶段（中文）、当前版本、Fallback + 来源、成功版本记录、三段耗时、SSH 调试入口、🧾 关键日志（`<pre>` 等宽块，最多 2800 字节） |
-| `⚠️ 归档告警 · <对象>` | 20 分钟归档循环失败 | 问题（上传失败 / 归档失败 / 目录缺失 / 状态不全）+ 对象名 + Run ID |
-| `⚠️ 最终归档告警 · <对象>` | 最终归档失败 | 同上；标题以「最终归档」区分阶段 |
-| `✅ OpenClaw 最终归档完成` / `⚠️ … 完成 · 部分失败` / `⚠️ … 未完成` | 最终归档之后（`Notify OpenClaw final archive result`） | 结果计数（成功 / 失败 / 跳过）+ 合计大小 + 快照名 + 📦 归档明细（每个包一行：结论 + 大小 + 去向）；归档步骤没产出明细（预检失败/运行被取消）时发「⚠️ 最终归档未完成」兜底 |
-| `⚠️ OpenClaw 即将进入最终归档` | keepalive 第 325 分钟 | 约 15 分钟后执行 `Stop OpenClaw and Final Archive` |
-| `🟢 workbuddy-gateway 已就绪` | **首轮**启动步骤自检通过且账号池非空（接力轮不重复推，见下） | 账号池结论、版本、更新说明、接口地址、API Key（等宽回显）、🗓 每日签到 · N、💳 逐账号（站点 / 状态 / 冷却时刻 · 额度 · 免费模型具体名称 · 模型冷却 N · 最早恢复 · Token 过期）、数据目录 |
-| `⚠️ workbuddy-gateway 已启动 · 无可用账号` | 服务已监听但账号池为空 | 提示需人工扫码登录（`login` 无法在 workflow 内完成） |
-| `❌ workbuddy-gateway 启动失败` | 进程启动即退，或 120 秒内未监听 8318 | 失败原因 + 🧾 原始输出（日志尾部 1200 字节） |
-| `⛔ / ⚠️ workbuddy-gateway 已停止` | 收尾停止段落执行后 | 版本与数据目录；仍有进程残留时降级 ⚠️ |
-| `🟢 trae2api 已就绪` | 容器健康检查通过、批量签到完成后 | 签到结论（已就绪 · 已签 / 待签 / 失败 / 共 N）、接口地址、API Key（等宽回显）、🩺 签到健康、📊 模型倍率、💳 逐账号（uid / 昵称 / 签到状态，子行为最早过期的 3 个积分包）、数据目录；签到 stderr 非空时附 🧾 原始输出 |
-| `⚠️ trae2api 已就绪 · 签到无输出` | 服务就绪但签到输出为空（工具失败或无账号） | 结论 + 接口 / API Key / 数据目录 + 🧾 原始输出（签到 stderr 尾部） |
-| `❌ trae2api 启动失败` | 容器 120 秒内健康检查未过 7864 | 结论（HTTP 码）+ 数据目录 + 🧾 原始输出（容器日志尾部 1200 字节，同时打到步骤日志） |
+通知种类与标题不在这里登记——用脚本现场枚举：
 
-> workbuddy 的就绪通知**只在首轮发**。本 workflow 由收尾步骤 `gh workflow run` 接力启动，
-> 接力轮会把同一套启动逻辑再跑一遍——同一个服务、同一份账号池，通知内容与上一条完全相同。
-> 判据是 `/tmp/workbuddy-serve-run-tag`（每 run 一台新 runner，重启即归零），
-> 仅在服务真的起来时写；接力轮只往 CI 日志打一行 `ℹ️ …跳过重复的就绪通知`。
-> 判定规则与写法见 [`telegram-notify.md`](telegram-notify.md)「规范 · 通知函数的正确接法」。
+```bash
+bash skills/telegram-notify-audit/scripts/list_notify.sh openclaw
+```
 
-> 「接口」写 `http://127.0.0.1:8318/v1`。**注意区分两个「默认」**：workbuddy-gateway
-> 上游 `-port` 默认值是 **8317**，与 OpenClaw 主 AI 网关（OmniRoute `:20128`，旧 CliRelay/CLIProxyAPI 曾占 8317）撞车，
-> 故本步骤启动时显式传 `-port 8318` 覆盖 —— 通知里的端口是**实际绑定端口**，
-> 不是上游默认值。「鉴权」写实际形态：serve 以 `-addr 0.0.0.0` 监听（对 Tailscale/
-> 局域网开放），启动显式传 `-api-key` 做客户端 Bearer 校验（取 job 级
-> `AI_GATEWAY_API_KEY`），通知以「API Key」一行等宽回显、写「未取到」兜底
-> （2026-10-05 订正——旧文「仅回环监听，无需密钥」与实际启动参数不符）。
-> 「🔑 凭据」分节已移除（2026-10-05，与账号池条目名重复）；`workbuddy*.json` 的
-> **内容**（真实 Access/Refresh Token）仍然绝不上通知，
-> serve 自己写的状态快照 `workbuddy-status.json` 不算凭据。
-> 「💳 账号池」的额度/状态/冷却取自 serve 写出的 `workbuddy-status.json`（**jq 解析**），
-> **免费模型名单另走上游「模型目录」接口**（不读快照的 `modelStates`，理由见下）。
-> 快照键名由上游 Go 结构体 `accountSnapshot` / `statusSnapshot` 的 json tag 固定
-> （`path` / `edition` / `state` / `tokenExpiresAt` / `quotaRemaining` / `quotaKnown` /
-> `isPaidUser` / `freeModels` / `modelCooldowns` / `modelStates`），比 `status` 子命令
-> 给人类看的对齐表格更可靠 —— 后者字段名后跟多个空格、`过期时间` 还独立成行，解析脆且易漏。
-> 中文状态名照上游 `monitor` 表格映射；额度格式照上游 `formatQuota`；
-> `quotaKnown` 为 false 时写「额度未获取」而非 0（那只是还没查到，不是耗尽）；
-> 快照里的 `nickname` / `uid` 不进通知。
-> serve 每 3 秒重写该文件，可能读到半截导致 jq 失败 —— 失败即本轮账号池整段跳过。
-> **冷却给「什么时候恢复」，账号级与模型级两层都给**：账号级取 `cooldownUntil`
-> （只在 `state=cooldown` 时展示，写 `冷却 YYYY-MM-DD HH:MM`）；模型级取
-> `modelStates[].cooldownUntil` 的**最小值**（`模型冷却 N · 最早 HH:MM 恢复`）。
-> 一律给绝对时刻、不折算「还剩多久」—— 通知是快照，读者看到时相对时长已不准。
-> `cooldownMsg` 与 `nickname` / `uid` 一样**不进通知**。
-> 字段口径、目录接口与免费判据逐条见本文第九章 9.1。
+版式见 [`telegram-notify.md`](telegram-notify.md)，档位见台账「OpenClaw Runner」行。
+只记几条非显然、写错会出事的约定：
 
-> trae2api 三条通知与 workbuddy-gateway **版式同源**（同为 AI 网关形态），差异只在数据
-> 来源：版本写 **Release tag**（2026-10-05 起取 fork 的 Release 静态二进制部署，不再
-> 浅克隆源码构建），账号池来自批量签到输出；「原始输出」非空才渲染。版式真源是
-> trae2api 步骤内的 `trae_notify()` 函数，独立按需签到 workflow `trae2api-notify.yml`
-> 已移除（2026-09-22）。
-> 字段口径见本文第九章 9.2。
-
-> `<对象>` 为归档短名：`OpenClaw 主包` / `ZCode` / `OmniRoute` / `rsstt` /
-> `rss-to-telegram`。此前五类归档共用「OpenClaw 归档告警」一个标题，无法从标题
-> 判断是哪个包出问题（看到标题会以为是主包，实际可能是 ZCode）。
-
-全部通知为全库统一 HTML 版式（规范唯一真源见 [`telegram-notify.md`](telegram-notify.md)：
-emoji 标题 + ━━━ 分隔线 + 键值/分节区 + 统一收尾行 `⏱ 已运行 X · 🔗 运行日志`），
-一律走发送层 `send_tg`：429 按 `retry_after` 重试，**HTML 解析失败直接报错、不重发**。
+- **端口**：workbuddy-gateway 通知里的 `8318` 是实际绑定端口（上游默认 8317，与本仓库
+  AI 网关撞车，启动显式 `-port 8318` 覆盖），不要写成上游默认值。
+- **API Key**：等宽回显 `AI_GATEWAY_API_KEY`，取不到写「未取到」；`workbuddy*.json`
+  的**内容**（真实 Access / Refresh Token）绝不上通知，`workbuddy-status.json` 是状态
+  快照、不算凭据。
+- **账号池 TSV 每一列都不许为空**（空值填 `-`）：制表符属 IFS 空白，中段空列会整体
+  左移，曾把冷却数渲染成模型名（`免费模型 1 · 2`）。列序见 `run-workbuddy.sh` 注释。
+- **数据源**：额度 / 状态 / 冷却取 `workbuddy-status.json`（jq）；免费模型**名单**走上游
+  模型目录接口（不读 `modelStates`）。`quotaKnown=false` 写「额度未获取」而不是 0。
+  冷却给绝对恢复时刻，账号级与模型级两层都给。
+- **归档短名**：`obj_label` 把包名映射成中文短名；没有映射的（CliRelay / CLIProxyAPI /
+  aigateway）原样显示文件名。
+- **keepalive 两条**：T-15 是 `ℹ️ … 进入收尾`（普通档，预告，服务仍在线）；T-2 是
+  `⛔ … 停机`（alert 档，请停手）。两条都是计划内，不是故障。
+- **最终归档汇总**：标题按严重度 `❌ 全败 > ⚠️ 部分失败 > ✅ 完成`；档位全败 alert、
+  其余普通。注意「全部跳过」目前会落到 ✅（实现待修）。
+- **交接**：五态（准备中 / 继任者已就绪 / 已交出 / 聊天入口已恢复 / 交接完成），普通档；
+  文案以 `handoff-notify.sh` 为准。
 
 ### 排障入口
 
@@ -863,139 +827,69 @@ serve 根本看不到，最快也要等下一轮（≈5.7 小时）。为此在�
 > 说明：OpenClaw 主网关（OmniRoute `:20128` → cloudflared `ai-api` 隧道）见第六节；
 > 本节服务是**并列的第二网关**，对外入口与归档一律互不涉及。
 
-## 九、通知字段口径
+## 九、通知口径
 
-版式规则见 [`telegram-notify.md`](telegram-notify.md)；本节的字段约定跟着实现走，
-改通知内容时先回这里对齐。逐条标题不在这里（用
-`bash skills/telegram-notify-audit/scripts/list_notify.sh openclaw` 现场枚举）。
+版式规则见 [`telegram-notify.md`](telegram-notify.md)；档位见台账。**逐条标题不在这里**
+（用 `list_notify.sh openclaw` 现场枚举）。下面只记非显然、写错会出事的约定。
 
 ### 9.1 workbuddy-gateway（`run-workbuddy.sh`）
 
-**结论**取自 serve 日志的「账号池」行（`有效 N, 失效 M`）；**接口**是
-`http://127.0.0.1:8318/v1`（启动显式传 `-port 8318`——上游默认 8317，OpenClaw 主
-AI 网关走 20128 OmniRoute，别把「上游默认」和「本仓库实际绑定」混为一谈）。
-**API Key** 一行等宽回显（`tg_add_path`，`AI_GATEWAY_API_KEY`），写「未取到」兜底，
-不编造密钥值。「🔑 凭据」分节已移除（凭据文件名与账号池条目名逐字重复，渲染两遍
-纯占版面）；`WB_CREDS` 变量保留——签到汇总仍用它算「跳过」数。**绝不回显
-`workbuddy*.json` 文件内容**（真实 Access/Refresh Token）；`workbuddy-status.json`
-是 serve 写的状态快照，不算凭据。
-
-**账号池**逐账号：`凭据文件 · 站点 · 状态`，子行 = `冷却时刻（仅冷却中） · 额度 ·
-免费/付费 · Token 过期 · 模型冷却 N · 最早 HH:MM 恢复` 与
-`免费模型 N · <模型名>`（各项非空才并入；免费模型名很多时拆独立子行）。
-**排序**：站点（国内站前）→ D 账号 → 数字账号按 131→156→175→176
-升序 → 其他保持原序（与看板 `sortAccounts` 同规则）。
-
-> **数据源**：`workbuddy-status.json` 键名由上游 Go 结构体 json tag 固定
-> （`path` / `edition` / `state` / `tokenExpiresAt` / `quotaRemaining` / `quotaKnown` /
-> `isPaidUser` / `cooldownUntil` / `cooldownMsg` / `freeModels` / `modelCooldowns` /
-> `modelStates`）。`freeModels` 是**降级兜底**计数；正式免费模型**名单**走上游模型
-> 目录接口（`GET {Base}/v2/enterprises/personal/models`，国内站
-> `copilot.tencent.com` / 国际站 `www.workbuddy.ai`，按账号 `edition` 分别请求，
-> 只读不耗额度；免费判据照上游 `siteKnownFree`：生效倍率 0 且促销未过期）。
-> `modelStates` **不进通知**（只含已实测模型、口径与目录接口不同）。
-> 中文状态名照上游 `monitor` 映射；额度格式照 `formatQuota`；
-> **`quotaKnown=false` 不显示额度数字**（写「额度未获取」，显示 0 会与「额度耗尽」混淆）。
-> `nickname` / `uid` 不进通知（隐私）。serve 每 3 秒重写该文件、可能读到半截导致
-> jq 失败：失败就本轮账号池整段跳过，不发半条、也不据此判服务未就绪。
-
-**冷却两层都要给恢复时刻**：
-
-| 层级 | 快照字段 | 通知写法 |
-|---|---|---|
-| 账号级 | `cooldownUntil`（秒）+ `cooldownMsg` | 子行 `冷却 YYYY-MM-DD HH:MM`（`state=cooldown` 才写） |
-| 模型级 | `modelStates[模型名].cooldownUntil` | 子行 `模型冷却 N · 最早 HH:MM 恢复`（N>0 才写） |
-
-- 时间一律**绝对时刻**不折算「还剩多久」；账号级完整日期时间，模型级只 `HH:MM`
-  且取所有冷却中模型里最早的。`cooldownUntil` 为 0/缺失整项跳过（不写「冷却 -」）。
-  `cooldownMsg` 不跟进通知（可能上百字符，读者要的是「何时恢复」）。
-
-**每日签到段**：分节 `🗓 每日签到 · N`，条目行 = `凭据 · 站点 · 结果 · 本次 +N ·
-累计 N · 连签 N 天`（积分三项仅 `active=true` 且已签时拼接，查询失败绝不编造）；
-子行 `Buddy 旅行 +N`（仅日志落过旅行奖励，窗口=今天东八区全天）；段尾 kv
-`本轮汇总` 与 `下次签到`（服务定时点，东八区）。签到接口响应体被网关丢弃，积分
-真源是活动状态接口 `POST {Origin}/v2/billing/meter/checkin-activity-status`
-（只读幂等，`data.active` / `today_checked_in` / `today_credit` / `total_credits` /
-`streak_days` / `daily_credit`）。国际站没有签到活动（积分按每日活跃对话发放）：
-启动步发最小活跃请求（免费模型 + max_tokens=64 + 客户端特征头），200 且确为对话流
-才落当日标记（`活跃 ✓ 已触发`）；429 按响应恢复时刻落 defer 文件，显示
-「活跃待重试 · 限流 HH:MM 后自动重试」；**绝不预填到账数字**。汇总行仅状态接口
-全覆盖时按展示行重算，有查询失败退回网关日志口径。
-
-**账号池 TSV 的每一列都不许为空：空值一律填哨兵 `-`**。制表符属 `IFS` 空白、连续
-制表符折叠成一个，中段空列会整体左移错位（实测把冷却数当成模型名渲染出
-`免费模型 1 · <code>2</code>`——编造不存在的模型名）。jq 侧空值填 `-`，渲染侧读入
-先还原空串再按「非空才并入」处理。列序：判定标记、凭据文件、站点、状态、账号级
-冷却、额度、**免费模型名（第 7 列）**、**模型冷却（第 8 列）**、Token 过期。
-**`免费模型 N` 的 N 以名单长度为准**（`freeModels` 是「已实测」数，两者不同），
-仅降级拿不到名单时才用快照计数。**免费模型清单属结构性清单，全量展示不折叠**
-（规范 · 折叠行），单个模型名是机器值 → `<code>`。
-
-「数据目录」指 Dropbox 持久数据目录（读者要照着放凭据的地方），不是本轮本地运行
-目录。「原因」按日志尾部分流：`Permission denied` → 二进制不可执行；未检测到有效
-凭据 → 需人工扫码；其余 → 启动即退。「更新」只在版本变化（或首次安装）时出现，
-「已在最新版」不写进「原因」。对象（版本 / 数据目录）机器值 → `<code>`，结论与
-原因裸文本，原始日志 `<pre>` 且是正文最后一块。
+- **接口** `http://127.0.0.1:8318/v1`（显式 `-port 8318`；上游默认 8317 与本仓库 AI
+  网关撞车）。**API Key** 等宽回显 `AI_GATEWAY_API_KEY`，取不到写「未取到」，绝不编造。
+- **绝不回显 `workbuddy*.json` 内容**（真实 Token）；`workbuddy-status.json` 是状态快照。
+- **账号池 TSV 每列都填**（空值 `-`）：连续制表符会被 `read` 折叠，中段空列整体左移 —
+  实测把冷却数当模型名渲染成 `免费模型 1 · <code>2</code>`。jq 侧填 `-`，渲染侧先还原
+  空串再按「非空才并入」。列序：判定标记、凭据文件、站点、状态、账号级冷却、额度、
+  免费模型名、模型冷却、Token 过期。
+- **数据源**：状态 / 额度 / 冷却取 `workbuddy-status.json`（jq，键名由上游 Go 结构体
+  json tag 固定）；免费模型名单走上游模型目录接口
+  `GET {Base}/v2/enterprises/personal/models`（国内站 `copilot.tencent.com` / 国际站
+  `www.workbuddy.ai`，按 `edition` 逐账号请求，只读不耗额度；判据：生效倍率 0 且促销
+  未过期）。**不读 `modelStates`**（只含已实测模型），也不用 `POST /admin/probe`
+  （逐模型真实请求，会超时且耗额度）。
+- `quotaKnown=false` 写「额度未获取」，不显示 0（0 会与「额度耗尽」混淆）。
+- **冷却给绝对时刻、两层都给**：账号级 `cooldownUntil`（仅 `state=cooldown` 时，
+  `冷却 YYYY-MM-DD HH:MM`）；模型级取 `modelStates[].cooldownUntil` 最小值
+  （`模型冷却 N · 最早 HH:MM 恢复`）。`cooldownMsg` 不进通知。
+- **排序**：站点（国内站前）→ D 账号 → 131→156→175→176 → 其他原序（与看板
+  `sortAccounts` 同规则）。`nickname` / `uid` 不进通知。
+- serve 每 3 秒重写快照，jq 读到半截即失败：本轮账号池整段跳过，不发半条、也不据此
+  判服务未就绪。
+- **签到**：积分真源是 `POST {Origin}/v2/billing/meter/checkin-activity-status`
+  （只读幂等），查询失败不编造。国际站无签到活动：启动步发最小活跃请求，429 落 defer
+  文件并显示「活跃待重试 · 限流 HH:MM 后自动重试」。
+- **就绪通知每轮都发**（2026-10-24 决定，接力轮也发；`/tmp` 标记文件仍写但不再用于静默）。
 
 ### 9.2 trae2api（`run-trae2api.sh`）
 
-版式同 workbuddy-gateway（第三个 AI 网关的对齐实现），差异在数据来源：
-
-- **`🩺 签到健康 · N`**（N 是账号数不是失败数）：分节计数后另起说明段点明「N 个
-  账号有备注」；条目主体「昵称 · 健康备注」自然语言 → `tg_add_entry_text` 裸文本；
-  全健康整段跳过。备注含：上次成功日期、⚠️ 连续失败 N 次、签到设备换代 +1
-  （自愈动过手的证据，不加 ⚠️）、⏳ 退避重试中（已退 N 次）。
-- 标题：`🟢 trae2api 已就绪` / `⚠️ trae2api 已就绪 · 签到无输出` /
-  `❌ trae2api 部署失败`（Release 解析失败 / SHA256SUMS 缺失）/ `❌ trae2api 启动失败`
-  （容器健康检查 120 秒未过）。结论以「已就绪」打头、只列非零签到计数
-  （`已就绪 · 已签 X · 待签 Y · 失败 Z（共 N）`）。
-- 「版本」写本轮部署的 **Release tag**（取 fork Release 静态二进制，非源码构建）；
-  「更新」与数据目录记录的上轮 tag 对比，未就绪轮次不落账、下轮仍报。
-- 「💳 账号池」来自批量签到输出：条目 `uid · 昵称 · 状态`，子行给未用完积分包里
-  最早过期的 3 个（`剩 N 分 · 时刻 过期`）。
-- 「🧾 原始输出」非空才渲染：启动失败给容器日志尾部；签到分支给签到工具 stderr
-  尾部（均 1200 字节）。正文另有「📊 模型倍率 · N」分节（数据源 `/v1/models` 的
-  consumption_rate）——与 workbuddy 的独立第二条通知同名不同体。
-- 「用量 + 流水」段（wb_notify 同款）：调 quota-board 的
-  `board.py usage-ledger <gateway> 12` CLI，与看板共用渲染与数据源，输出为空静默跳过。
+- 版式与 workbuddy 同源，差异在数据来源：版本写 **Release tag**（取 fork Release 静态
+  二进制，非源码构建）；账号池来自批量签到输出。
+- `🩺 签到健康 · N`（N 是账号数）：条目主体是自然语言，走 `tg_add_entry_text`；全健康
+  整段跳过。备注含上次成功日期、连续失败、设备换代、退避重试。
+- 「🧾 原始输出」非空才渲染（容器日志 / 签到 stderr 尾部，1200 字节）。
+- 「📊 模型倍率 · N」与 workbuddy 的独立第二条通知同名不同体。
+- 「用量 + 流水」走 `board.py usage-ledger <gateway> 12`，空输出静默跳过。
 
 ### 9.3 zcode2api（`run-zcode2api.sh`）
 
-本地 GLM 网关（8319，Anthropic + OpenAI 双协议）。代码来自 jarvanh/zcode2api fork，
-.env 与账号池数据快照在 Dropbox `self-hosted/zcode2api-data.tar.gz`；
-credential_sync.py 每轮对齐凭据，收尾归档回传快照，凭据闭环；仅结构性变更
-（增删账号、改 .env）才需手动重传。
-
-- **自检是真发消息**：判据「上游返回了助手内容块」（`content` 数组非空即过——GLM 是
-  思考模型，`max_tokens` 小了会只有 `thinking` 块，按 text 判会误报）。healthz/模型
-  列表通不算数。
-- **Plan 通道降级如实报**：主探 `glm-5.3-flash`（Plan 通道，仅验证码类错误重试
-  3 轮）；全败退探 `bigmodel/GLM-5.3`（Key 通道；**网关侧默认关闭**，关闭时退探
-  即时 403 channel_disabled）。退探能通 = 服务本体健康、仅 Plan 通道降级 → 🟡，
-  **降级轮不进接力静默**（每轮必报）。
-- **🟡/🟠 中间态分类**：`quota`（额度耗尽）/`unavailable`（账号池全冷却）→
-  `🟡 已就绪 · 全部通道额度耗尽`（结论写明「非启动故障」）；`channel`（回退通道被关）
-  → `🟡 已就绪 · 回退通道已关闭`；Plan 通道单独降级 → `🟡 已就绪（Plan 通道降级）`；
-  `auth`（网关 Key / 上游鉴权不符）→ `🟠 鉴权失败`。红色 ❌ 只留给真正的启动失败。
-- **失败态不给「接口 / 鉴权 / 模型」三行**（服务已不在，展示指向已停进程的地址会
-  误导）；自检输出与服务日志尾部（各 15 行）进「🧾」分节。
-- **💳 账号池分节**：条目行 = `名称 · 通道 · 状态`，子行 = 额度/有效期/套餐 +
-  最近错误（有效期取 quota.expires_at、精确到时刻、固定 TZ=Asia/Shanghai）。
-  数据源是 admin API 脱敏视图；服务已监听才采集，失败只少一节不改结论。就绪与
-  失败通知都带。
-- **API Key**：独立 secret `ZCODE_GATEWAY_API_KEY` 注入为 `ZCODE_GATEWAY_KEY`
-  （与 workbuddy 的 key 分家；qingyan 用 `GLM2API_GATEWAY_KEY`）。
-  写「未取到」兜底，不编造密钥值。
+- **自检必须真发消息**：判据是上游返回助手 `content` 块（GLM 是思考模型，只回
+  `thinking` 时按 text 判会误报）；healthz / 模型列表通不算。
+- **Plan 通道降级如实报**：主探 `glm-5.3-flash` 全败后探 `bigmodel/GLM-5.3`；能通 =
+  服务健康、仅 Plan 降级 → 🟡，且**降级轮每轮必报、不静默**。
+- **中间态分类**：`quota` / `unavailable` → 🟡「全部通道额度耗尽」；`channel` → 🟡
+  「回退通道已关闭」；`auth` → 🟠「鉴权失败」；❌ 只留给真正的启动失败。
+- 失败态**不给**「接口 / 鉴权 / 模型」三行（服务已不在，指向已停进程会误导）。
+- 账号池条目 `名称 · 通道 · 状态`，子行额度 / 有效期（东八区）/ 套餐 / 最近错误；
+  数据源 admin API 脱敏视图，采集失败只少一节、不改结论。
+- API Key 用独立 secret `ZCODE_GATEWAY_API_KEY`（与 workbuddy 分家）；取不到写「未取到」。
 
 ### 9.4 资产段（口径真源在看板）
 
-`📅 资产 · 签到与有效期` 是就绪通知的内嵌段（`run-{workbuddy,trae2api,zcode2api,
-qoder2api,autoclaw}.sh`）：签到汇总 + 时间维度（wb 额度刷新 / zcode 套餐到期 /
-trae 即将过期 / autoclaw 今日领取）。数据源 = `board.py assets <src>` CLI——口径
-真源在看板，通知只引用，零漂移。`run-qingyan.sh` 走同一 CLI 的 TSV 分支（净额），
-不自带分节。看板改口径后跑规范 · 资产段桥接冒烟。
+`📅 资产 · 签到与有效期` 是就绪通知的内嵌段，数据源 `board.py assets <src>` CLI——口径
+真源在看板，通知只引用。`run-qingyan.sh` 走同一 CLI 的 TSV 分支。看板改口径后跑
+规范 · 资产段桥接冒烟。
 
 ### 9.5 AI 网关用量报告
 
-`openclaw.yml` step `Notify AI gateway usage report`（普通档）：标题与内容来自
+`openclaw.yml` 的 `Notify AI gateway usage report`（普通档）：标题与内容来自
 `board.py usage-report`，仓库内无标题字面量。
