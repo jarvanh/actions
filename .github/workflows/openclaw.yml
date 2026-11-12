@@ -1103,7 +1103,8 @@ jobs:
           sudo tailscale serve --bg --http=8081 http://127.0.0.1:8319
           echo "zcode-hub 后台: http://${TS_FQDN}:8081/admin/accounts（API 网关: /v1）"
 
-          sudo tailscale serve --bg --http=8080 http://127.0.0.1:18080
+          # trae2api 2026-11-12（bc18280）起 /admin 只在主端口 7864；18080 仅登录回调。
+          sudo tailscale serve --bg --http=8080 http://127.0.0.1:7864
           echo "trae2api 控制台: http://${TS_FQDN}:8080/admin"
 
           # workbuddy 只读管理台（v1.23.0 -webui，真源 services.sh）：8316 → 8082。
@@ -1120,7 +1121,7 @@ jobs:
           # tailscaled 虽以 --state=mem: 运行，实测**仍能签发证书**（8443-8448 全通，
           # TLS 校验无需 -k）—— 上面「签不了 HTTPS 证书」的判断只对无端口 443 成立
           # 的历史场景，勿再据此断言带端口 https 不可用。映射与看板 admin_entries 一致：
-          #   8443→8316(wb) 8444→18080(trae) 8445→8319(zcode)
+          #   8443→8316(wb) 8444→7864(trae) 8445→8319(zcode)
           #   8446→8322(autoclaw) 8447→8790(qoder) 8448→20128(omniroute)
           # 证书签发失败不能拖垮整步，统一加兜底 echo（与 443 同款处理）。
           # 2026-10-29 起证书来自跨轮缓存（上游 Restore/Install 步骤已把有效证书
@@ -1128,7 +1129,7 @@ jobs:
           # 缓存缺席且撞上 LE 429 限频（每周 5 张上限）时才会走到。
           sudo tailscale serve --bg --https=8443 http://127.0.0.1:8316 2>/dev/null \
             || echo "⚠️ 8443 HTTPS serve 失败，HTTP 8082 仍可用"
-          sudo tailscale serve --bg --https=8444 http://127.0.0.1:18080 2>/dev/null \
+          sudo tailscale serve --bg --https=8444 http://127.0.0.1:7864 2>/dev/null \
             || echo "⚠️ 8444 HTTPS serve 失败，HTTP 8080 仍可用"
           sudo tailscale serve --bg --https=8445 http://127.0.0.1:8319 2>/dev/null \
             || echo "⚠️ 8445 HTTPS serve 失败，HTTP 8081 仍可用"
@@ -1720,7 +1721,7 @@ jobs:
       #    combo（free）与模型本身都没问题，纯粹是跨网络不可达。挂上后即可用
       #    qwen3.8-flash 直连，runner-qoder/Qwen3.8-Flash 前缀名也一起通。
       # 仍保留 -p 端口映射，宿主机 curl / 看板访问不受影响。
-      # 与 trae2api 18080 同款形态）；看板走 Tailscale serve 8084（见 Tailscale 段）。
+      # 与 trae2api 7864 同款形态）；看板走 Tailscale serve 8084（见 Tailscale 段）。
       # 数据直写 Dropbox fuse：/dropbox/self-hosted/qoder2api/{accounts,usage}——
       # 账号池/用量/调度状态全是 JSON/JSONL（无 SQLite），fuse 挂载点无锁兼容问题，
       # 无需本地盘中转；持久化白名单内（A 类），周期归档/收尾归档均无需登记（对齐 trae2api）。
