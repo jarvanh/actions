@@ -22,7 +22,7 @@
 |---|---|---|---|
 | OpenList 同步 | `.github/scripts/openlist/`（`load_all.sh` 注入真源；`telegram.sh` 的 `send_telegram_message` 统一出口） | 任务预览、进度面板、同步结果、跳过、源端异常、存储账号失效、修复 / 还原 / 灾难恢复、趋势、分卷、演练、落盘校验降级 | 结果与流水**普通**；源端大小异常、存储账号失效、落盘校验降级、灾难恢复 **alert**；进度面板与 `sendDocument` 直连主 bot，不参与路由 |
 | Telegram 频道视频 | `.github/scripts/tg-channel/` | 同步汇总、单文件级失败、去重、残留清理、频道清理、媒体 caption | 全**普通**；视频 caption 走 Telethon 上传、错误日志走 `sendDocument`，不经 sendMessage 发送层 |
-| 备份与任务结果 | workflow 内联（`github_backup_all.yml`、`self-hosted_backup.yml`、`icloud-photos-downloader.yml`、`pixivutil2.yml`、`ph-dl.yml`、`p.yml`） | 备份成功 / 异常 / 失败 / 中断、iCloud 结果、Pixiv 结果、ph-dl 损坏与收藏夹同步、vaultwarden 恢复失败 | 失败 / 异常 / 中断 **alert**；iCloud **全普通**；ph-dl 结果与损坏**普通**、整轮崩溃兜底 **alert**；Pixiv 失败与未运行 **alert**，其余普通 |
+| 备份与任务结果 | workflow 内联（`github_backup_all.yml`、`self-hosted_backup.yml`、`notion-backup.yml`、`icloud-photos-downloader.yml`、`pixivutil2.yml`、`ph-dl.yml`、`p.yml`） | 备份成功 / 异常 / 失败 / 中断、Notion 备份结果、iCloud 结果、Pixiv 结果、ph-dl 损坏与收藏夹同步、vaultwarden 恢复失败 | 失败 / 异常 / 中断 **alert**；Notion 成功**普通**、失败 / 中断 **alert**；iCloud **全普通**；ph-dl 结果与损坏**普通**、整轮崩溃兜底 **alert**；Pixiv 失败与未运行 **alert**，其余普通 |
 | OpenClaw Runner | `.github/workflows/openclaw.yml` + `.github/scripts/openclaw/run-*.sh` | 入口与凭据、自愈、归档、配额预检、keepalive、接力、AI 网关部署 | **alert**。例外走**普通**：keepalive T-15 收尾预告、新 run 已启动、AI 网关用量报告、交接进度五态（`handoff-notify.sh`）、**最终归档汇总（非全败时；全败仍 alert）**。T-2 停机预警仍 alert |
 | AI 网关（workbuddy / trae2api / zcode2api / qingyan / autoclaw / qoder2api） | `.github/scripts/openclaw/run-*.sh` | 就绪 / 降级 / 鉴权失败 / 风控停用与解除 / 空库兜底 / 未就绪 / 停服 | **alert**；`⏭️ qingyan-proxy 已跳过` **普通** |
 | Windows 入口 | `.github/workflows/rdp.yml`、`tailscale-windows.yml` | RDP 入口、SSH + RDP + 出口网络 | **alert** |

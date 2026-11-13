@@ -11,7 +11,7 @@
 | 2 | 平铺条目 | `•` | 零使用，仅注释提及 |
 | 3 | 半角冒号 kv | `[一-龥]:[^/:= ]` | 仅非通知代码（echo / grep 表达式） |
 | 4 | 紧凑时长 / 高精度浮点 / ISO 直出 | `[0-9]+h ?[0-9]+m\|[0-9]\.[0-9]{4,} 秒\|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}` | 仅注释、测试夹具、非通知数据 |
-| 5 | curl 直发 | `curl .*(sendMessage\|/bot)` | 只允许：发送层自身、进度面板（`openlist/telegram.sh` 的 `message_id` / `deleteMessage`）、`sendDocument`（`sync_notify.sh`）。`ensure-miniapp-menu.sh` 配置菜单不属通知。**新增直发点即偏差**，不按固定处数判 |
+| 5 | curl 直发 | `curl .*(sendMessage\|/bot)`（行尾 `\` 续行先拼成逻辑行再匹配） | 只允许：发送层自身、进度面板（`openlist/telegram.sh` 的 `message_id` / `deleteMessage`）、`sendDocument`（`sync_notify.sh`）。`ensure-miniapp-menu.sh` 配置菜单不属通知。**新增直发点即偏差**，不按固定处数判 |
 | 6 | 分隔线 | `TG_SEP *=\|━━━` | 四处同值 18 条（bash 真源 / pwsh `0x2501*18` / python `'━'*18` / `sync_to_tg.sh` 内嵌） |
 | 7 | 收尾区覆盖 | 按文件统计 `tg_add_title` 与 `tg_add_footer\|Get-TgFooter\|tg_footer_line` | 计数不等时查是否分支汇聚或注释；每处标题分支都必须能走到 footer |
 | 8 | 运行日志接线 | `grep -l TG_RUN_URL .github/workflows/*.yml` | **现场重数，不记固定数字**。判据是「每个发通知的 step 都有 `TG_RUN_URL`」；直接构造通知的 workflow 数与注入面不必相等。caption 场景也需注入 |

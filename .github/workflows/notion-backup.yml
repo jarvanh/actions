@@ -58,22 +58,37 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # 告警档凭据（tier=alert 直达告警 bot @SaberFuckBot，无回落）
+          TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
+          TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
           JOB_STATUS: ${{ job.status }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          if [ "${JOB_STATUS}" = "success" ]; then
-            ICON="✅"; TITLE="Notion 备份成功"
-          elif [ "${JOB_STATUS}" = "cancelled" ]; then
-            ICON="⚪"; TITLE="Notion 备份被取消"
-          else
-            ICON="❌"; TITLE="Notion 备份失败"
+          if { [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; } && { [ -z "$TELEGRAM_BOT_TOKEN_ALERT" ] || [ -z "$TELEGRAM_CHAT_ID_ALERT" ]; } then
+            echo "Telegram 凭证未配置，跳过发送通知。"
+            exit 0
           fi
-          TEXT="${ICON} ${TITLE}
-          时间: $(date -u '+%Y-%m-%d %H:%M UTC')
-          运行: ${RUN_URL}"
-          curl -fsS --retry 3 --retry-delay 5 \
-            -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-            --data-urlencode "text=${TEXT}" \
-            --data-urlencode "disable_web_page_preview=true" >/dev/null
+          source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+
+          msg=""
+          if [ "${JOB_STATUS}" = "cancelled" ]; then
+            tg_add_title msg "⛔ Notion 备份已中断"
+            tg_add_note msg "任务被取消，数据未受影响；如需继续请重新运行。"
+            tg_add_footer msg
+            send_tg "$msg" alert || echo "::warning::TG 通知发送失败（不影响任务结果）"
+            exit 0
+          fi
+          if [ "${JOB_STATUS}" = "success" ]; then
+            tg_add_title msg "✅ Notion 备份成功"
+            tg_add_kv msg "日期" "$(TZ=Asia/Shanghai date +'%Y-%m-%d')"
+            tg_add_kv msg "状态" "完成"
+          else
+            _tier="alert"     # ❌ 备份失败 = 告警档
+            tg_add_title msg "❌ Notion 备份失败"
+            tg_add_kv msg "日期" "$(TZ=Asia/Shanghai date +'%Y-%m-%d')"
+            tg_add_kv msg "状态" "失败"
+            tg_add_note msg "请前往 GitHub Actions 查看日志详情。"
+          fi
+          tg_add_footer msg
+          send_tg "$msg" "${_tier:-}" || echo "::warning::TG 通知发送失败（不影响任务结果）"

@@ -395,12 +395,31 @@ def check():
     add(4, "紧凑时长/长小数/ISO 直出", bad)
 
     # 5 curl 直发（白名单外即偏差）
+    # curl 常写成「行尾 \ 续行，下一行才出现 /bot」：逐行扫会整条漏掉
+    # （notion-backup.yml 就这样躲过了检查）。先按续行拼成逻辑行再匹配。
+    def logical_lines(path):
+        buf, start = "", 0
+        for i, l in enumerate(open(path, encoding="utf-8", errors="replace").read().split("\n"), 1):
+            if not buf:
+                start = i
+            s = l.rstrip()
+            if s.endswith("\\"):
+                buf += s[:-1].rstrip() + " "
+                continue
+            buf += l
+            yield start, buf
+            buf = ""
+        if buf:
+            yield start, buf
+
     bad = []
     for p in all_files:
-        for i, l in enumerate(open(p, encoding="utf-8", errors="replace").read().split("\n"), 1):
+        if p in CURL_ALLOW:
+            continue
+        for i, l in logical_lines(p):
             if l.strip().startswith("#"):
                 continue
-            if re.search(r"curl .*(sendMessage|/bot)", l) and p not in CURL_ALLOW:
+            if re.search(r"curl\b.*(sendMessage|/bot)", l):
                 bad.append(f"{p}:{i}: {l.strip()[:80]}")
     add(5, "curl 直发（白名单外）", bad)
 
