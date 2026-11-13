@@ -60,6 +60,8 @@ on:
         required: false
         type: string
 
+permissions:
+  contents: read
 jobs:
   speedtest:
     concurrency: proxy-speedtest-gitee-singleton

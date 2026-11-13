@@ -90,6 +90,8 @@ on:
 # 靠下面 job 里「不并发列举」的取舍压到最低。
 concurrency: openlist-restore-tryrun
 
+permissions:
+  contents: read
 jobs:
   tryrun:
     runs-on: ubuntu-latest

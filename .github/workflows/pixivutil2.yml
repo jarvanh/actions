@@ -7,6 +7,8 @@ on:
   watch:
     types: started
 
+permissions:
+  contents: read
 jobs:
   build:
     # 安全守卫（2026-09-08）：公开仓库任何人 star 都会触发 watch 事件——仅放行仓库本人，

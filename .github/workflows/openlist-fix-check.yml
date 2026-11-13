@@ -86,6 +86,8 @@ on:
 # 独立并发组: 不与 openlist-singleton（主轮）互等，也不与 openlist-diag 互等
 concurrency: openlist-fix-check
 
+permissions:
+  contents: read
 jobs:
   fixcheck:
     runs-on: ubuntu-latest

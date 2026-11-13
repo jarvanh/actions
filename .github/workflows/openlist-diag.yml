@@ -148,6 +148,8 @@ on:
 
 concurrency: openlist-diag
 
+permissions:
+  contents: read
 jobs:
   diag:
     runs-on: ubuntu-latest

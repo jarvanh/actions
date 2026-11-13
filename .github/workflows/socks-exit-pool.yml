@@ -17,6 +17,8 @@ on:
 
 concurrency: socks-exit-pool
 
+permissions:
+  contents: read
 jobs:
   build:
     runs-on: ubuntu-latest

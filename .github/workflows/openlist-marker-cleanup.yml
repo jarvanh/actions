@@ -19,6 +19,8 @@ on:
 
 concurrency: openlist-marker-cleanup
 
+permissions:
+  contents: read
 jobs:
   cleanup:
     runs-on: ubuntu-latest

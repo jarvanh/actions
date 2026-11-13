@@ -9,6 +9,8 @@ concurrency:
   group: backup-repos
   cancel-in-progress: false
 
+permissions:
+  contents: read
 jobs:
   backup:
     runs-on: ubuntu-latest

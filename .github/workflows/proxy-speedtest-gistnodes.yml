@@ -85,6 +85,8 @@ concurrency:
   group: proxy-speedtest-gistnodes-singleton
   cancel-in-progress: false
 
+permissions:
+  contents: read
 jobs:
   fetch-nodes:
     runs-on: ubuntu-latest
