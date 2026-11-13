@@ -84,7 +84,7 @@ fi
 # 隧道被停后不会自己回来。这里先 start 一次，3 秒后复检，仍起不来才告警。
 #
 # 2026-11-11：原实现只查「已安装」的 cftun-*，对「从未安装」完全失明 —— qb 因
-# ensure 落在看板就绪之前被静默跳过，qb.derrick.eu.org 报 Cloudflare 1033，而本脚本
+# ensure 落在看板就绪之前被静默跳过，qb.<VD>.eu.org 报 Cloudflare 1033，而本脚本
 # 连续三轮 fails=0（实测）。改为按 tunnels.conf 反向核对：源站端口在听却没有单元
 # = 公网入口缺失，先调 tunnels.sh ensure 自愈一次，仍缺失才告警。
 if [ "$boot_age_min" -ge 40 ]; then

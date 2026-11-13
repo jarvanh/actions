@@ -1141,7 +1141,7 @@ jobs:
             || echo "⚠️ 8448 HTTPS serve 失败，OmniRoute 控制台将无入口"
           echo "HTTPS 控制台: wb=8443 trae=8444 zcode=8445 autoclaw=8446 qoder=8447 omniroute=8448"
           # OmniRoute AI API 无端口 HTTPS 入口：20128 → 443。
-          # 公网 ai-api.derrick.eu.org 走 Cloudflare，有 100s 硬超时；tailnet 内这条
+          # 公网 ai-api.<VD>.eu.org 走 Cloudflare，有 100s 硬超时；tailnet 内这条
           # 前面没有 Cloudflare，慢请求（step-5-preview 深度思考实测单请求 18~330s）
           # 走这里不撞墙。证书由 tailscale 自动签发、客户端免 -k（实测 TLS 校验通过）。
           # ⚠️ 若节点名变更导致证书签发失败，不能让整步挂掉，故加兜底 echo。
@@ -1152,7 +1152,7 @@ jobs:
           # 2026-09-30 曾尝试把 trae 挂到 80 端口的 /trae 子路径（依赖 trae2api commit
           # a75ec3e 的前端前缀自适应），后已整体回退：a75ec3e 被 revert（镜像
           # v2026.09.30-46abeff），zcode 也从 80 挪到 8081，与 trae 端口相邻。
-          # 公网隧道 trae2api.derrick.eu.org 已于 2026-09-29 撤销（主人要求不再公网暴露）。
+          # 公网隧道 trae2api.<VD>.eu.org 已于 2026-09-29 撤销（主人要求不再公网暴露）。
 
       - name: Trigger cert issue & stash Tailscale certs (gpg 加密暂存)
         id: ts_certs_stash
@@ -1645,7 +1645,7 @@ jobs:
       # restart: unless-stopped 已覆盖崩溃自愈，dockerd 自身重启也会拉回容器，
       # 再包一层 systemd 是重复托管；systemd --user 只管裸进程形态的
       # workbuddy-gateway / zcode2api（见 services.sh）。
-      # 隧道 trae2api（原 trae2api.derrick.eu.org → 127.0.0.1:7864）已于 2026-09-29 撤销：
+      # 隧道 trae2api（原 trae2api.<VD>.eu.org → 127.0.0.1:7864）已于 2026-09-29 撤销：
       # /dropbox/self-hosted/.cloudflared 恢复，由 tunnels.conf 纳管。
       - name: Run trae2api container (TRAE SOLO reverse proxy)
         # 2026-10-22 步骤重排后位于 Run OpenClaw 之后：本步失败不得级联跳过
@@ -1699,7 +1699,7 @@ jobs:
       # 原先这里从 Dropbox 静态副本 cp unit，与 write_unit 双轨并存、改配置易漏改。
       # 现由 ensure 生成并每轮重启一次；/dropbox 下那份副本已无权威性（不再读取）。
       # 看板本体 board.py 仍在 /dropbox/self-hosted/quota-board/（持久化目录，非 unit）。
-      # 隧道 qb（qb.derrick.eu.org → 127.0.0.1:8321）
+      # 隧道 qb（qb.<VD>.eu.org → 127.0.0.1:8321）
       # 凭证随 /dropbox/self-hosted/.cloudflared 恢复，由 tunnels.conf 纳管。
       # QUOTA_BOARD_TOKEN 持久化在 ~/.openclaw/.env（随 openclaw.tar.gz 归档每轮恢复），
       # unit 的 EnvironmentFile 指向该文件，本 step 只负责拉起服务。
@@ -2332,7 +2332,7 @@ jobs:
             # 2026-11-11：qb（看板 Mini App）**不在此处启动** —— 本步在交接轮里早于
             # 「Run quota-board」，而看板要等 AI 闸门放行才起（可能几分钟），
             # tunnels.sh 的端口等待只有 60s → qb 被静默跳过，看板公网入口直接缺失
-            #（实测：qb.derrick.eu.org 报 Cloudflare 1033）。改由 Run quota-board
+            #（实测：qb.<VD>.eu.org 报 Cloudflare 1033）。改由 Run quota-board
             # 在确认看板存活后启动（含 tunnels.sh 缺失时的 nohup 兜底）。
           else
             nohup cloudflared tunnel run --url http://127.0.0.1:18789 oc \
@@ -2552,7 +2552,7 @@ jobs:
               #  校验，失败就把单元状态与 journal 尾部打进日志，避免又是「静默掉线」。
               #  ⚠️ 本检查必须留在**看板自己的步骤**里：此前它被放进「Install auxiliary
               #  CLIs」，而那一步恒早于本步 → 探测到 unit=inactive → 直接跳过 ensure qb，
-              #  qb.derrick.eu.org 报 Cloudflare 1033（2026-11-11 实测）。
+              #  qb.<VD>.eu.org 报 Cloudflare 1033（2026-11-11 实测）。
               sleep 15
               _qb_st="$(systemctl --user is-active quota-board 2>/dev/null || true)"
               _qb_port=0
@@ -2598,9 +2598,11 @@ jobs:
               # workspace 副本丢失后安全网空转 3 天）。真源改为本仓库 .github/scripts/telegram/，
               # 与 tg_notify.sh 同级；workspace 路径仅作过渡期兜底。
               if [ -f "$GITHUB_WORKSPACE/.github/scripts/telegram/ensure-miniapp-menu.sh" ]; then
-                bash "$GITHUB_WORKSPACE/.github/scripts/telegram/ensure-miniapp-menu.sh" || true
+                QB_URL_BASE="https://qb.${{ secrets.VD }}.eu.org" \
+                  bash "$GITHUB_WORKSPACE/.github/scripts/telegram/ensure-miniapp-menu.sh" || true
               elif [ -f "$HOME/.openclaw/workspace/scripts/ensure-miniapp-menu.sh" ]; then
-                bash "$HOME/.openclaw/workspace/scripts/ensure-miniapp-menu.sh" || true
+                QB_URL_BASE="https://qb.${{ secrets.VD }}.eu.org" \
+                  bash "$HOME/.openclaw/workspace/scripts/ensure-miniapp-menu.sh" || true
               else
                 echo "⚠️ ensure-miniapp-menu.sh 缺失（仓库与 workspace 均无），跳过 Mini App 入口重建"
               fi

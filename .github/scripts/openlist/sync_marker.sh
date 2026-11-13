@@ -1144,7 +1144,7 @@ _top_dirs_to_lines() {
 #   发带 ✅/❌ 按钮的消息；主人点 ✅ → 回调回网关 → agent 触发
 #   `gh workflow run ... -f force_sync_task=<任务键>`。
 # 依赖环境变量（workflow secrets 注入；缺任一即静默跳过，绝不阻断告警本身）:
-#   OPENCLAW_HOOK_URL   — 网关 hook 端点，如 https://oc.derrick.eu.org/hooks/agent
+#   OPENCLAW_HOOK_URL   — 网关 hook 端点，如 https://oc.<VD>.eu.org/hooks/agent
 #   OPENCLAW_HOOK_TOKEN — 与 openclaw.json 的 hooks.token 一致
 # 失败语义: fail-open。审批是"加急通道"，不是告警的必要条件 —— 推送失败只写
 #   stderr 供日志排查，不影响同步跳过决策，也不改变已发出的告警。

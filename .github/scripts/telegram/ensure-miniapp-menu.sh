@@ -10,17 +10,23 @@
 #   不再依赖 workspace 副本，runner 重置也冲不掉。
 #
 # 动作（幂等，重复执行无害）：
-#   1) @openclaw_sb_bot    → web_app 按钮「📊 额度看板」→ https://qb.derrick.eu.org/p/<QUOTA_BOARD_TOKEN>
+#   1) @openclaw_sb_bot    → web_app 按钮「📊 额度看板」→ https://qb.<VD>.eu.org/p/<QUOTA_BOARD_TOKEN>
 #   2) @sbsbsbsbsb_openclaw_bot（旧入口 bot）→ 清成 type=commands，避免双入口
 #
 # 凭据来源：~/.openclaw/.env（随 openclaw.tar.gz 归档每轮恢复）
 #   TELEGRAM_BOT_TOKEN_OPENCLAW_SB_BOT / TELEGRAM_BOT_TOKEN_SBSBSBSBSB_OPENCLAW_BOT / QUOTA_BOARD_TOKEN
-# 允许环境变量覆盖：QB_URL_BASE（默认 https://qb.derrick.eu.org）
+# 允许环境变量覆盖：QB_URL_BASE（默认 https://qb.<VD>.eu.org）
 
 set -euo pipefail
 
 ENV_FILE="${HOME:-/home/runner}/.openclaw/.env"
-QB_URL_BASE="${QB_URL_BASE:-https://qb.derrick.eu.org}"
+# 默认值不再硬编码 VD 域：必须由调用方注入 QB_URL_BASE（workflow 用 secrets.VD 拼）
+QB_URL_BASE="${QB_URL_BASE:-}"
+
+if [ -z "$QB_URL_BASE" ]; then
+  echo "❌ 未设置 QB_URL_BASE，跳过（避免把 VD 域写死在公开仓库）" >&2
+  exit 0
+fi
 
 [ -f "$ENV_FILE" ] || { echo "❌ $ENV_FILE 不存在，无法取 token，跳过"; exit 0; }
 # shellcheck disable=SC1090
