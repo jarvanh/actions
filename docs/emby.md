@@ -448,6 +448,9 @@ bash skills/telegram-notify-audit/scripts/list_notify.sh   # 关注 emby.yml
       最新关键数据（data / config / plugins / metadata），不含图片缓存，
       也不含 metadata/library（海报/背景图原图，见下）。体量小、恢复快，
       是最新的，所以排在最前
+①b 增量镜像（回退源）：gd:backup/emby/live（`EMBY_BACKUP_FALLBACK_DEST` 可覆盖）——
+      主源「列得出目录、下载全 401」时的接续来源。宁可回退到落后半天的镜像，
+      也不回退到几个月前的全量包：旧库一旦跑起来并回写，等于把主源静默回滚
 ② OneDrive 流式：rclone cat onedrive:backup/emby/emby-backup.tar.zst | tar -I zstd -xf -
       （30GB 级 tarball 不落本地盘，流式解压；**含图片缓存**，但关键数据往往比 ① 旧）
 ③ Dropbox 流式：rclone cat dropbox:self-hosted/emby-backup.tar.zst | tar -I zstd -xf -
@@ -455,6 +458,11 @@ bash skills/telegram-notify-audit/scripts/list_notify.sh   # 关注 emby.yml
 ④ Dropbox 目录：dropbox:self-hosted/emby → 整目录拷贝（**唯一会落盘的兜底**，
   需先按远端体量预检 /tmp；恢复后必须重建 `cache` 软链，否则缓存会写进根分区）
 ```
+
+⚠️ **回退源恢复的轮次整轮只读**：主源不可读、改由 ①b 拉起时，运行期核心/图像/状态
+三条上云通道与收尾备份全部跳过（`/tmp/emby-skip-backup`），全量包的图片缓存补齐也不做——
+回退数据只用来把服务拉起来，不作为新基准。主源与镜像都读不出来时本步**直接失败**并写
+`/tmp/wf-fail-reason`，让通知带上原因，绝不让旧全量包顶替。
 
 ⚠️ **① 成功后 ② 不是“再来一遍”**：全量包是 `/mnt/emby-cache`（图片缓存）的唯一载体
 （打包用 `tar -h` 解引用软链），但它的 `data`/`config`/`plugins`/`metadata` 通常比 ① 旧。
@@ -758,6 +766,8 @@ sudo EMBY_USER="$EMBY_USER" python3 emby_guard.py <emby-data-root>   # 例：/va
 | 备份没回传 | 收尾步骤 | `/tmp/EMBY_READY_FOR_BACKUP` 不存在（Emby 未成功启动），或磁盘预检未过 |
 | 通知「数据备份」显示`全量跳过（预算不足）` | `incbackup.log` + 收尾步骤 | 保留时长设太长或启动恢复太慢，剩余预算不够全量打包。**关键数据已增量同步**，只是图片缓存本轮不回传；调小 `EMBY_RUN_MINUTES` 即可 |
 | 恢复走了旧的全量包 | `install emby` 步骤 | 增量目录 `onedrive:backup/emby/live` 为空或校验失败（看该步骤是否打印`增量恢复校验不通过`） |
+| 增量目录下载 401（`HTTP error 401 ... An unexpected error has occurred`） | 本机 `rclone cat onedrive:backup/emby/live/odwarm-status.txt --head 1` | OneDrive 个人版 tempauth 站点级故障：列目录/元数据正常、下载全 401（2026-11-13 实测）。本轮自动回退 `gd:backup/emby/live` 且整轮不写云；恢复进度用 `tools/onedrive_probe.py` 跟踪 |
+| 通知「失败原因」缺失 | `/tmp/wf-fail-reason` 是否存在 | 关键脚本主动写入；shell 级崩溃（如 unbound variable）由 `install emby` 的 ERR/EXIT trap 补一行（含行号或退出码）。若仍为空，说明失败发生在别的 step，按失败位置查 |
 | 播放通知片名显示`未知` | 归档的 `playlog.log` | 反查全程 401 = secret 密钥在恢复库里失效（Tokens_2 中无此登录态或 IsActive=0）。`run emby` 步骤启动前会把 secret 密钥以专属设备登录态写回 `authentication.db` 并激活（幂等自愈）；若日志出现"密钥自愈失败"则需人工核对 Emby 版本 schema |
 | 播放通知没来 | `playlog.log` 的 TG 通道自检 | ge2o 日志格式变化 / Emby 401 / 300s 去重窗口内 |
 | 海报墙/首屏预热恒为 0、宽度档显示"无" | 归档 `warmup.log` 的「海报墙/首屏预热宽度档」行 → `wallwarm.log` → `ge2o.log` | **本轮没有客户端浏览时属预期行为**（只预热实际消费过的尺寸）。判据：看 `ge2o.log` 里有没有**非 127.0.0.1** 的 `Images/Primary?maxWidth=` 请求——有却没预热 = 统计链路坏了；完全没有 = 这轮根本没人访问，去看 run 时段对不对 |

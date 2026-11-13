@@ -532,6 +532,15 @@ jobs:
       - name: install emby
         run: |
           set -euo pipefail
+          # -E：ERR trap 也进函数（lib.sh 的 require_free_kb / validate_emby_data 失败时同样留原因）
+          set -E
+          # 任何 shell 级异常（最典型：set -u 下的 unbound variable）也要留下失败原因。
+          # 2026-11-13 RESTORED_FROM 崩溃时脚本一行原因都没写，通知只剩「失败位置」，
+          # 主人只能点日志自翻——正是 2026-10-11 明确要求过不要出现的情况。
+          # 脚本主动写的原因优先，trap 只在文件为空时补一行。ERR 带行号；unbound variable
+          # 这类直接终止 shell 的错误不会触发 ERR，所以再用 EXIT 兜底（无行号）。
+          trap 'rc=$?; if [ ! -s /tmp/wf-fail-reason ]; then printf "install emby 脚本异常退出（line %s, code %s）\n" "$LINENO" "$rc" > /tmp/wf-fail-reason; fi' ERR
+          trap 'rc=$?; if [ "$rc" -ne 0 ] && [ ! -s /tmp/wf-fail-reason ]; then printf "install emby 脚本异常退出（code %s）\n" "$rc" > /tmp/wf-fail-reason; fi' EXIT
           # zstd 用于后续 30GB 级备份包的流式解压
           # ⚠️ 与 rclone-run 同源的铁律：apt 必须带超时且先探测，绝不裸跑
           source "$EMBY302_DIR/lib.sh"
