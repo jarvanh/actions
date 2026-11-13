@@ -258,6 +258,15 @@ workflow 会把 `*.sh` `*.py` `*.jq` 拷到 `/tmp` 再 `source /tmp/load_all.sh`
 gd**（两者源端合计 1527 GiB，而 gd 实际可用约 927 GiB，容量也不允许）。注册表里
 不应出现 `task4-gd` / `task5-gd`。
 
+⏸ **当前已临时移出（2026-11-13，用户决定）**：Google Drive 配额已满 —— 实测
+`rclone about gd:` 为 `Used 2.883 TiB / Total 15 GiB`（付费容量掉了）。生产日志证实
+这 5 个对**每个文件**都撞 `googleapi: Error 403: The user's Drive storage quota has
+been exceeded`（run 43267803971，gd:backup 自 20:08:01 起连续 403），配额恢复前不可能
+写入、每轮只在首个对上白烧约 7 次重试 ⇒ `SYNC_TASK_REGISTRY` 已移除
+`backup-gd` / `task0-gd`~`task3-gd`，原行以注释形式留在数组下方（含恢复说明）。
+配额快速失败（`_quota_backend_key` 按远端分组）与同盘跳过逻辑**保持不变**，
+容量恢复后把 5 行放回数组即可，无需其他改动。
+
 `gd:` 目标不经过写探针 / F5 全拒闸 / 批次巩固 / `_sync_mirror_prune` / truth-check /
 修复管线 —— 这些都在 `[[ $dest_path == openlist:* ]]` 处提前返回。`file_split.sh`
 另有代码级硬闸：非 `openlist:*` 目标一律跳过 `split_on_sync_failure`，因为该路径会
