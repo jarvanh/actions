@@ -949,7 +949,7 @@ jobs:
 
             if [ "$actual_entries" -gt 0 ]; then
               REMOTE_PROC_LOG="onedrive:/logs/processed/processed_videos_$(date +%Y%m%d_%H%M%S).log"
-              rclone copyto "processed_videos.log" "$REMOTE_PROC_LOG" || true
+              timeout 180 rclone copyto "processed_videos.log" "$REMOTE_PROC_LOG" || true
             fi
 
             rm -f "processed_videos.log" 2>/dev/null || true
@@ -957,25 +957,50 @@ jobs:
 
           # 镜像同步状态标记到 Dropbox（marker 是修复文件还原链路的唯一索引，
           # 与源端同在 OneDrive —— OneDrive 整体故障时灾难恢复需要外置副本）
+          # ⚠️ 必须带 timeout（2026-11-13 加，run 43267803971 实证）:
+          #   本 step 是 always()，一旦某次网络调用无限挂起，**后面的 Persist（DB
+          #   回传）与「自续触发」都不会执行**。该轮就是这样死的: step 22 在 00:17
+          #   正常结束（279min，预算内），step 23 却从 00:17 挂到 01:40 被平台 6h
+          #   硬杀 —— Persist 与接力全丢，只能等 3h cron 补位。
+          #   注意 `|| true` 只能挡"失败"，挡不住"卡住"。
           echo "镜像 sync_state → dropbox..."
-          rclone sync onedrive:/logs/sync_state dropbox:sync_state_mirror --create-empty-src-dirs 2>&1 | tail -2 || true
-          echo "sync_state 镜像完成: $(rclone lsf dropbox:sync_state_mirror 2>/dev/null | wc -l | tr -d ' ') 个文件"
+          timeout 600 rclone sync onedrive:/logs/sync_state dropbox:sync_state_mirror --create-empty-src-dirs 2>&1 | tail -2 || echo "⚠️ sync_state 镜像超时/失败（不阻断收尾）"
+          echo "sync_state 镜像完成: $(timeout 120 rclone lsf dropbox:sync_state_mirror 2>/dev/null | wc -l | tr -d ' ') 个文件"
 
           # ⚠️ 镜像是 sync（**删除会传播**），源端 marker 被删/被清空时副本会一起没，
           # 挡不住"OneDrive 上的数据没了" ⇒ 另做一份**打包归档**（只增不删、带保留期）。
           # 短哈希不可逆 ⇒ 丢 marker = 短哈希目录里的文件只剩密文名、无法自愈回原路径，
           # 这是这条兜底链路唯一无法自愈的单点（详见 §13）。
           echo "打包备份 sync_state → dropbox..."
-          if backup_sync_state_to_dropbox; then
+          # 有界执行（2026-11-13 加）: 这些是 shell 函数，`timeout` 只能包外部命令，
+          #   故用「后台 + 轮询 + 超时 kill」。收尾 step 是 always()，这里一旦挂住，
+          #   Persist 与自续触发都不会跑（run 43267803971 就是这么丢掉接力的）。
+          _run_bounded() {  # $1=秒数 $2=标签，其余=要执行的命令
+            local _secs="$1" _label="$2"; shift 2
+            ( "$@" ) & local _pid=$!
+            local _i=0
+            while kill -0 "$_pid" 2>/dev/null; do
+              if [ "$_i" -ge "$_secs" ]; then
+                kill -9 "$_pid" 2>/dev/null || true
+                echo "⚠️ ${_label} 超过 ${_secs}s → 强制终止（不阻断收尾）"
+                return 124
+              fi
+              sleep 2; _i=$((_i + 2))
+            done
+            wait "$_pid"
+          }
+          if _run_bounded 900 "marker 打包备份" backup_sync_state_to_dropbox; then
             echo "marker 打包备份成功"
           else
-            echo "⚠️ marker 打包备份未成功（不阻断收尾，见上方原因；持续失败需人工介入）"
+            echo "⚠️ marker 打包备份未成功/超时（不阻断收尾，见上方原因；持续失败需人工介入）"
           fi
 
           # P0 趋势: 追加本轮 {历时/净传/剩余} 到 trend.jsonl 并回传，
           # 发送 "📈 同步趋势" 通知（近 5 轮速率 + 剩余 + 预计清零时间）。
           # 放在 always() 收尾里: 被 6h 上限取消的 run 也计入趋势，不丢样本
-          trend_record_and_notify "${{ github.run_id }}" "${{ github.event_name }}"
+          # 同样加界: 趋势要读远端 trend.jsonl + 发 Telegram，任一卡住都会拖死收尾
+          _run_bounded 600 "趋势记录与通知" trend_record_and_notify "${{ github.run_id }}" "${{ github.event_name }}" \
+            || echo "⚠️ 趋势记录/通知超时或失败（不阻断收尾）"
 
           rm -f /tmp/*.sh /tmp/*.py /tmp/*.jq 2>/dev/null || true
           # P4: 按同步 step 实际结论分流收场消息——旧版无条件打印
