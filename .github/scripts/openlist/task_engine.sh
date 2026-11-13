@@ -234,12 +234,40 @@ _pairs_parallel_reap_one() {
       if [ -n "$_pid" ] && ! kill -0 "$_pid" 2>/dev/null; then
         wait "$_pid" 2>/dev/null || true
         local _be2="${_pp_be[$_idx]:-}"
-        unset "_pp_pid[$_idx]" "_pp_be[$_idx]" "_pp_dst[$_idx]"
+        unset "_pp_pid[$_idx]" "_pp_be[$_idx]" "_pp_dst[$_idx]" "_pp_pd[$_idx]"
         [ -n "$_be2" ] && unset "_busy_be[$_be2]"
         _done_n=$((_done_n + 1))
         _failed_n=$((_failed_n + 1))
         echo "⚠️ 并行同步对 worker 异常退出（无结果文件），按失败计: 第 $((_idx + 1))/${_pp_n} 个"
         return 0
+      fi
+      # ===== 超份额强杀（2026-11-13 加，run 43395636678 实证）=====
+      # 病灶: worker 在份额到点后**不会自己停** —— 份额闸只拦"新开单元"，
+      #   而在途单元、truth-check（重启容器+全量列举）、持久化复核都不读份额闸。
+      #   实测该轮: 第 6 对份额 20min 却跑了 **84.0min**（超出 64min）、第 7 对
+      #   79.6min（+60min）、第 8 对 42.0min（+22min），且后半程所有传输都被
+      #   `_budget_slice_seconds` 的 60s 兜底截断 ⇒ 占着槽位却产出 0 B。
+      #   后果: 320 分钟只服务了 15/16 个对，公平轮转被打穿。
+      # 做法: 份额终点 + 宽限（默认 600s，留给收尾落 marker）后仍未退出 ⇒ kill -9，
+      #   按 truncated 计（与"到点交棒"同语义，不是后端故障），并立刻释放槽位。
+      #   安全性: 子目录 marker / 修复状态均**增量落盘**，杀进程只丢当前在途单元，
+      #   下轮接力即可（与既有硬顶放弃同一套安全论证）。
+      if [ -n "$_pid" ]; then
+        local _pd2="${_pp_pd[$_idx]:-}" _ovg="${OPENLIST_PAIR_OVERRUN_GRACE_SECONDS:-600}"
+        [[ "$_ovg" =~ ^[0-9]+$ ]] || _ovg=600
+        if [[ "$_pd2" =~ ^[0-9]+$ ]] && [ "$_pd2" -gt 0 ] \
+           && [ "$(date +%s)" -gt $(( _pd2 + _ovg )) ]; then
+          local _ovm=$(( ( $(date +%s) - _pd2 ) / 60 ))
+          kill -9 "$_pid" 2>/dev/null || true
+          wait "$_pid" 2>/dev/null || true
+          local _be3="${_pp_be[$_idx]:-}"
+          unset "_pp_pid[$_idx]" "_pp_be[$_idx]" "_pp_dst[$_idx]" "_pp_pd[$_idx]"
+          [ -n "$_be3" ] && unset "_busy_be[$_be3]"
+          _done_n=$((_done_n + 1))
+          _trunc_n=$((_trunc_n + 1))
+          echo "⏰ 第 $((_idx + 1))/${_pp_n} 个同步对已超份额 ${_ovm}min（宽限 ${_ovg}s）→ 强制收摊交棒（子 marker/修复状态已落盘，非后端故障）"
+          return 0
+        fi
       fi
     done
     sleep 2
@@ -254,7 +282,7 @@ _run_registry_pairs_parallel() {
   [ "$_par" -lt 2 ] && _par=2
   local _pp_dir="/tmp/ol_pairs_$(date +%s)_${BASHPID:-$$}"
   mkdir -p "$_pp_dir"
-  declare -A _pp_pid=() _pp_be=() _pp_dst=() _busy_be=() _started=() _quota_logged=()
+  declare -A _pp_pid=() _pp_be=() _pp_dst=() _busy_be=() _started=() _quota_logged=() _pp_pd=()
   # 这几个是"调用方局部": _pairs_parallel_reap_one 靠 bash 动态作用域改它们，
   # 因此既不能声明在 reap 内部（改了看不见），也不能不声明（会污染全局）
   local _pp_n="$n" _done_n=0 _failed_n=0 _trunc_n=0 total_transferred=0
@@ -379,6 +407,13 @@ _run_registry_pairs_parallel() {
       _pp_pid[$idx]=$!
       _pp_be[$idx]="$_pick_be"
       _pp_dst[$idx]="$_dst"
+      # 份额终点也要记录（2026-11-13 加）: reap 端用它实现「超份额强杀」。
+      #   只有 epoch 才能被 reap 轮询比对（share 秒数不行）。无份额（调试）置空。
+      if [[ "$_pd_epoch" =~ ^[0-9]+$ ]]; then
+        _pp_pd[$idx]="$_pd_epoch"
+      else
+        _pp_pd[$idx]=""
+      fi
       _running=$((_running + 1))
       continue
     fi
