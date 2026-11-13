@@ -325,7 +325,7 @@ services:
       PORT: 20128
       OMNIROUTE_MEMORY_MB: "4096"
       BASE_URL: http://omniroute:20128
-      AUTH_COOKIE_SECURE: "false"
+      AUTH_COOKIE_SECURE: "true"
       # 上下文窗口自动校正（auto:discovery）周期：24h 扫描上游同步缓存，
       # 上游 /v1/models 报窗口（context_length 等字段）→ 自动写 auto override；
       # model_context_overrides 里的 manual 行永不覆盖（跳过）。设 0 可关闭。
@@ -636,7 +636,7 @@ start_omniroute() {
       -e PORT=20128 \
       -e OMNIROUTE_MEMORY_MB=4096 \
       -e BASE_URL=http://omniroute:20128 \
-      -e AUTH_COOKIE_SECURE=false \
+      -e AUTH_COOKIE_SECURE=true \
       -e PRICING_SYNC_ENABLED=true \
       -e REQUEST_TIMEOUT_MS=1800000 \
       -e OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS=150000 \
