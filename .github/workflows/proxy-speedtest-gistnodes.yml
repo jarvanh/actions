@@ -381,7 +381,16 @@ jobs:
       gist_filename: proxy_speedtest_gistnodes_result_taier.yaml
       gist_description: 'proxy speedtest result (gist 抓节点 · taier 三网)'
       label: 'gist 节点'
-    secrets: inherit
+    secrets:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PAT: ${{ secrets.PAT }}
+      PROXY_SPEEDTEST_GISTNODES_GIST_ID: ${{ secrets.PROXY_SPEEDTEST_GISTNODES_GIST_ID }}
+      PROXY_SPEEDTEST_SUB_URLS: ${{ secrets.PROXY_SPEEDTEST_SUB_URLS }}
+      PROXY_SPEEDTEST_TAIER_GIST_ID: ${{ secrets.PROXY_SPEEDTEST_TAIER_GIST_ID }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
 
   speedtest-gitee:
     needs: fetch-nodes
@@ -397,7 +406,18 @@ jobs:
       gist_filename: proxy_speedtest_gistnodes_result_gitee.yaml
       gist_description: 'proxy speedtest result (gist 抓节点 · gitee 上下行)'
       label: 'gist 节点'
-    secrets: inherit
+    secrets:
+      GITEE_PRIVATE_TOKEN: ${{ secrets.GITEE_PRIVATE_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PAT: ${{ secrets.PAT }}
+      PROXY_SPEEDTEST_GISTNODES_GIST_ID: ${{ secrets.PROXY_SPEEDTEST_GISTNODES_GIST_ID }}
+      PROXY_SPEEDTEST_GIST_ID: ${{ secrets.PROXY_SPEEDTEST_GIST_ID }}
+      PROXY_SPEEDTEST_GITEE_OWNER: ${{ secrets.PROXY_SPEEDTEST_GITEE_OWNER }}
+      PROXY_SPEEDTEST_SUB_URLS: ${{ secrets.PROXY_SPEEDTEST_SUB_URLS }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
 
   speedtest-cdn:
     needs: fetch-nodes
@@ -413,4 +433,14 @@ jobs:
       gist_filename: proxy_speedtest_gistnodes_result_cdn.yaml
       gist_description: 'proxy speedtest result (gist 抓节点 · cdn 镜像站)'
       label: 'gist 节点'
-    secrets: inherit
+    secrets:
+      GITEE_PRIVATE_TOKEN: ${{ secrets.GITEE_PRIVATE_TOKEN }}
+      PAT: ${{ secrets.PAT }}
+      PROXY_SPEEDTEST_CDN_GIST_ID: ${{ secrets.PROXY_SPEEDTEST_CDN_GIST_ID }}
+      PROXY_SPEEDTEST_GISTNODES_GIST_ID: ${{ secrets.PROXY_SPEEDTEST_GISTNODES_GIST_ID }}
+      PROXY_SPEEDTEST_GITEE_OWNER: ${{ secrets.PROXY_SPEEDTEST_GITEE_OWNER }}
+      PROXY_SPEEDTEST_SUB_URLS: ${{ secrets.PROXY_SPEEDTEST_SUB_URLS }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_BOT_TOKEN_ALERT: ${{ secrets.TELEGRAM_BOT_TOKEN_ALERT }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TELEGRAM_CHAT_ID_ALERT: ${{ secrets.TELEGRAM_CHAT_ID_ALERT }}
