@@ -587,17 +587,11 @@ jobs:
           # 赋值，后面任何 "$RESTORED_FROM" 都会让整步直接死在 unbound variable 上——实测
           # 2026-11-13 OneDrive 大面积 401 时，备份/兜底全链路一步没跑就被这一行打断。
           RESTORED_FROM=""
-          RESTORED_DEST=""
-          # 增量源按优先级排：主源（Emby 自己回写的 OneDrive）→ 备用镜像（gd，通常只落后半天）。
-          # 备用源存在的意义：主源整体不可读时，宁可回退到半天前的镜像，也不要回退到几个月前的
-          # 全量包——那种旧库一旦跑起来并回写，等于把主源反向回滚。
           PRIMARY_LIVE_DEST="${EMBY_BACKUP_DEST:-onedrive:backup/emby/live}"
-          FALLBACK_LIVE_DEST="${EMBY_BACKUP_FALLBACK_DEST:-gd:backup/emby/live}"
           PRIMARY_LIVE_UNREADABLE=0
-          for LIVE_DEST in "$PRIMARY_LIVE_DEST" "$FALLBACK_LIVE_DEST"; do
-            [ -n "$LIVE_DEST" ] || continue
-            LIVE_BYTES=$(rclone size "$LIVE_DEST" --json 2>/dev/null | jq -r '.bytes // 0' || echo 0)
-            [ "${LIVE_BYTES:-0}" -gt 0 ] || continue
+          LIVE_DEST="$PRIMARY_LIVE_DEST"
+          LIVE_BYTES=$(rclone size "$LIVE_DEST" --json 2>/dev/null | jq -r '.bytes // 0' || echo 0)
+          if [ "${LIVE_BYTES:-0}" -gt 0 ]; then
             echo "✅ 发现增量备份目录 $LIVE_DEST（$(( LIVE_BYTES / 1048576 ))MB），尝试恢复关键数据..."
             require_free_kb /tmp $(( LIVE_BYTES / 1024 + 2 * 1024 * 1024 )) "emby live-restore preflight (/tmp)"
             rm -rf /tmp/emby-live-restore && mkdir -p /tmp/emby-live-restore
@@ -611,41 +605,33 @@ jobs:
                  --transfers 16 --checkers 32 --low-level-retries 20 \
                  --onedrive-no-versions -v; then
               echo "::warning::增量目录 $LIVE_DEST 读取失败（源不可用）"
-              if [ "$LIVE_DEST" = "$PRIMARY_LIVE_DEST" ]; then PRIMARY_LIVE_UNREADABLE=1; fi
+              PRIMARY_LIVE_UNREADABLE=1
               rm -rf /tmp/emby-live-restore
-              continue
+            else
+              sudo cp -a /tmp/emby-live-restore/. /var/lib/emby/
+              # cp 可能把软链目录替换成真实目录，重建缓存软链，否则缓存写进根分区
+              sudo rm -rf /var/lib/emby/cache
+              sudo ln -sfn /mnt/emby-cache /var/lib/emby/cache
+              sudo chown -R emby:emby /var/lib/emby
+              if validate_emby_data /var/lib/emby; then
+                echo "🎉 增量备份恢复并校验成功（源 $LIVE_DEST，不含图片缓存，冷启动后重新生成）"
+                RESTORED_FROM=live
+                rm -rf /tmp/emby-live-restore
+              else
+                echo "::warning::增量恢复校验不通过（源 $LIVE_DEST），继续尝试全量包..."
+                sudo rm -rf /var/lib/emby/* 2>/dev/null || true
+                sudo ln -sfn /mnt/emby-cache /var/lib/emby/cache
+                rm -rf /tmp/emby-live-restore
+              fi
             fi
-            sudo cp -a /tmp/emby-live-restore/. /var/lib/emby/
-            # cp 可能把软链目录替换成真实目录，重建缓存软链，否则缓存写进根分区
-            sudo rm -rf /var/lib/emby/cache
-            sudo ln -sfn /mnt/emby-cache /var/lib/emby/cache
-            sudo chown -R emby:emby /var/lib/emby
-            if validate_emby_data /var/lib/emby; then
-              echo "🎉 增量备份恢复并校验成功（源 $LIVE_DEST，不含图片缓存，冷启动后重新生成）"
-              RESTORED_FROM=live
-              RESTORED_DEST="$LIVE_DEST"
-              rm -rf /tmp/emby-live-restore
-              break
-            fi
-            echo "::warning::增量恢复校验不通过（源 $LIVE_DEST），继续尝试下一个来源..."
-            sudo rm -rf /var/lib/emby/* 2>/dev/null || true
-            sudo ln -sfn /mnt/emby-cache /var/lib/emby/cache
-            rm -rf /tmp/emby-live-restore
-          done
+          fi
           # 主源「列得出目录、读不出文件」= 云端可读性事故（OneDrive tempauth 大面积 401 正是这种形态）。
           # 此时不要往更老的兜底上退：onedrive 全量包同源、同样 401；Dropbox 全量包可能已是
           # 几个月前的旧库，旧库跑一轮并回写主源 = 静默回滚。宁可本轮失败、下一轮重试。
           if [ -z "$RESTORED_FROM" ] && [ "$PRIMARY_LIVE_UNREADABLE" = "1" ]; then
-            echo "::error::主增量目录 $PRIMARY_LIVE_DEST 存在但读不出来，且无可用增量回退源；已阻止旧全量包回滚主源"
+            echo "::error::主增量目录 $PRIMARY_LIVE_DEST 存在但读不出来；已阻止旧全量包回滚主源"
             echo "主增量目录不可读（疑似 OneDrive 下载 401），已阻止旧全量包回滚" > /tmp/wf-fail-reason
             exit 1
-          fi
-          # 回退源恢复的那一轮绝不能写回云端：主源上躺着更新的快照，写回 = 静默回滚。
-          # 这里只打个标记，运行期备份与收尾备份都据此整轮跳过（重建主源之前，回退数据
-          # 只用于把 Emby 拉起来，不作为新基准）。
-          if [ -n "$RESTORED_DEST" ] && [ "$RESTORED_DEST" != "$PRIMARY_LIVE_DEST" ]; then
-            echo "::warning::本轮关键数据来自回退源 $RESTORED_DEST；本轮跳过全部云端备份，避免旧数据覆盖主源 $PRIMARY_LIVE_DEST"
-            : > /tmp/emby-skip-backup
           fi
 
           echo "🔍 正在检查 OneDrive 上的压缩备份（含图片缓存，流式解压不落本地盘）..."
@@ -666,9 +652,7 @@ jobs:
                   # （/mnt/emby-cache，live 明确不含它）。tar 只取 ./cache 一个成员，
                   # 不碰 data/config/plugins/metadata/顶层文件——否则等于把新数据回滚。
                   # zstd 不支持随机访问，整条流仍要解压一遍，省不掉那几分钟，但至少不丢数据。
-                  if [ "$RESTORED_DEST" != "$PRIMARY_LIVE_DEST" ]; then
-                      echo "⏭️ 关键数据来自回退源，跳过 onedrive 全量包的图片缓存补齐（缓存按需重建）"
-                  elif [ "${EMBY_CACHE_RESTORE:-1}" = "0" ]; then
+                  if [ "${EMBY_CACHE_RESTORE:-1}" = "0" ]; then
                       echo "⏭️ 关键数据已由增量恢复；图片缓存恢复已关闭（EMBY_CACHE_RESTORE=0）"
                   else
                       echo "✅ 关键数据已由增量恢复，全量包只补图片缓存..."
@@ -2384,13 +2368,7 @@ jobs:
           done
           IB_EOF
           chmod +x /opt/emby_incbak.sh
-          # 回退源恢复的轮次整轮不写云（核心/图像/状态三条通道全停）：那份数据比主源旧，
-          # 写回会把主源拉退；回退只用来把服务拉起来，不作为新基准。
-          if [ -f /tmp/emby-skip-backup ]; then
-            echo "::warning::本轮数据来自回退源，跳过运行期备份（核心/图像/状态）"
-          else
-            nohup bash /opt/emby_incbak.sh loop > /opt/logs/incbackup.log 2>&1 &
-          fi
+          nohup bash /opt/emby_incbak.sh loop > /opt/logs/incbackup.log 2>&1 &
           # ---- 轻观测通道：小状态文件每 10 分钟上云（KB 级），与 25 分钟核心备份解耦 ----
           # 让"回填进度 / 起播读数 / 海报补回结果"最迟 10 分钟可查，而不是等核心快照。
           # 目标路径与核心快照相同（live/ 下同名覆盖），读取入口不变。playlog 截断到
@@ -2421,11 +2399,7 @@ jobs:
           done
           SS_EOF
           chmod +x /opt/emby_status_sync.sh
-          if [ -f /tmp/emby-skip-backup ]; then
-            echo "⏭️ 回退源恢复轮回：状态上云已关闭"
-          else
-            nohup bash /opt/emby_status_sync.sh > /opt/logs/status-sync.log 2>&1 &
-          fi
+          nohup bash /opt/emby_status_sync.sh > /opt/logs/status-sync.log 2>&1 &
 
       - name: start link prefetcher
         # 把"取直链"从起播关键路径挪走（302 起播慢的主力：冷解析实测 0.65~0.86s）：
@@ -2772,12 +2746,6 @@ jobs:
 
           if [ ! -f /tmp/EMBY_READY_FOR_BACKUP ]; then
               echo "⚠️ Emby 未能成功启动，跳过备份以防空数据覆盖云端。"
-              exit 0
-          fi
-
-          if [ -f /tmp/emby-skip-backup ]; then
-              echo "⏭️ 本轮数据来自回退源，整轮不写云（避免旧数据覆盖主源）——主源恢复后由下一轮重新基准。"
-              echo "回退源跳过" > /tmp/emby-backup-result
               exit 0
           fi
 
