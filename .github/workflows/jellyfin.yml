@@ -203,8 +203,13 @@ jobs:
             nohup cloudflared tunnel run --url http://127.0.0.1:8096 j &
           fi
       - name: sleep
+        env:
+          JELLYFIN_API_TOKEN: ${{ secrets.JELLYFIN_API_TOKEN }}
         run: |
-          sleep 340m && curl -X POST -H "X-Emby-Token: ***REMOVED-JELLYFIN-TOKEN***" http://127.0.0.1:8096/System/Shutdown
+          sleep 340m
+          # 优雅停机；token 失效时退回 pkill，避免把轮换状态绑死在停机步骤上
+          curl -fsS -X POST -H "X-Emby-Token: ${JELLYFIN_API_TOKEN}" http://127.0.0.1:8096/System/Shutdown \
+            || sudo pkill -f /usr/bin/jellyfin || true
           sleep 10m
 
       # ===== 数据回传（失败/取消也执行）=====
@@ -214,7 +219,7 @@ jobs:
         if: ${{ always() }}
         run: |
           # SIGTERM 让 Jellyfin 优雅停机（幂等；上一步已停过也无害）。
-          # 这里不走 HTTP Shutdown，是为了避免把 API Token 再硬编码一份。
+          # 这里不走 HTTP Shutdown，改用 pkill；避免依赖 API Token。
           sudo pkill -f /usr/bin/jellyfin 2>/dev/null || true
           sleep 30
           if [ ! -f /tmp/JELLYFIN_DATA_PULLED ]; then
