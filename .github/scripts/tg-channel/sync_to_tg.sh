@@ -166,15 +166,16 @@ def build_fail_notify(title: str, file: str, elapsed: float, lines: list):
     （故用 耗时：N 秒 kv 形态，不加 ⏱ 前缀冒充收尾）。动态内容一律 esc()。
     """
     parts = [
-        # 标题 = emoji + 短语（裸文本，规范 · 取值行口径；此前加粗与 tg_add_title 版式漂移）
-        # 标题（emoji + 短语）裸文本；值/计数按 规范 · 取值行口径
+        # 标题 = emoji + 短语（裸文本）；kv 用全角冒号 + 标签锚点
         f"{esc(title)}",
         TG_SEP,
-        # 文件名属机器值 → <code>；emoji 不套标签（规范 · 取值行口径）
-        f"📁 {tg_entry(shorten_name(os.path.basename(file)))}",
-        f"📦 分组：{tg_entry(CAPTION_PREFIX)}",  # 机器值 → <code>（规范 · 取值行口径）
-        f"耗时：{fmt_secs(elapsed)}",
+        # 文件名属机器值 → <code>；标签锚点与同通知其他行一致
+        f"文件：{tg_entry(shorten_name(os.path.basename(file)))}",
+        f"分组：{tg_entry(CAPTION_PREFIX)}",
     ]
+    # 单文件耗时属正文数据；占位场景（处理脚本缺失）不渲染 0.00 秒
+    if elapsed is not None and elapsed >= 0:
+        parts.append(f"耗时：{fmt_secs(elapsed)}")
     parts.extend(lines)
     return "\n".join(parts)
 
@@ -460,8 +461,9 @@ def main():
     failed_list = []
 
     for modtime, file, size in pending:
-        # 将 ISO 8601 modtime 转成东八区展示时间（规范 · 日期与相对时间）
-        modtime_display = modtime
+        # 将 ISO 8601 modtime 转成东八区展示时间（规范 · 日期与相对时间）；
+        # 解析失败写「未知」，不把 ISO/UTC 原样带进 caption
+        modtime_display = "未知"
         if modtime:
             try:
                 dt = datetime.fromisoformat(modtime.replace("Z", "+00:00"))
@@ -495,9 +497,9 @@ def main():
                 "❌ 下载失败",
                 file, dl_elapsed,
                 [
-                    f"📦 大小：{human_size(size)}",
+                    f"大小：{human_size(size)}",
                     # 多行日志走 <pre>（与「输出尾部」同款，避免裸换行破坏排版）
-                    "📄 rclone stderr：\n" + tg_pre_block(result.stderr[-500:].strip() if result.stderr else "(无错误输出)"),
+                    "\n📄 rclone stderr\n" + tg_pre_block(result.stderr[-500:].strip() if result.stderr else "(无错误输出)"),
                 ],
             ))
             continue
@@ -516,8 +518,8 @@ def main():
             failed_list.append(f"{file}\t处理脚本缺失 · {proc_one}")
             notify(build_fail_notify(
                 "❌ 处理/上传失败",
-                file, 0.0,
-                [f"📄 原因：处理脚本不存在\n{tg_pre_block(proc_one)}"],
+                file, -1.0,
+                [f"\n📄 原因\n{tg_pre_block(proc_one)}"],
             ))
             continue
         print(f"🎬 开始处理/上传: {file}")
@@ -599,7 +601,7 @@ def main():
                     "❌ 处理/上传失败",
                     file, up_elapsed,
                     # 多行块统一用 tg_pre_block（转义 + <pre> 包裹）
-                    [f"📄 输出尾部：\n{tg_pre_block(err_tail)}"] if err_tail else ["📄 无详细输出，见 Actions 日志"],
+                    [f"\n📄 输出尾部\n{tg_pre_block(err_tail)}"] if err_tail else ["📄 无详细输出，见 Actions 日志"],
                 ))
 
         # 清理工作目录
@@ -758,8 +760,9 @@ if [ -n "$SKIPPED_DETAILS" ]; then
   tg_add_block msg "$(_render_skipped_groups "$SKIPPED_DETAILS")"
 fi
 tg_add_footer msg
-send_tg_chunked "$msg"
-# 供 workflow 的 always() 兜底步判断「汇总已发过」，避免崩溃时双发/漏发
-touch "${RUNNER_TEMP:-/tmp}/tg-channel-summary-sent" 2>/dev/null || true
+# 只有发送成功才落 marker：失败时让 always() 兜底步补发，避免静默丢失
+if send_tg_chunked "$msg"; then
+  touch "${RUNNER_TEMP:-/tmp}/tg-channel-summary-sent" 2>/dev/null || true
+fi
 
 rm -rf "$TMP_DIR"

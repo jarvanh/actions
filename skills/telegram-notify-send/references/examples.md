@@ -2,9 +2,7 @@
 
 全部摘自本仓库。写新通知时**照着抄结构**，不要自创。
 
-本文件**不给行号**——行号会随实现漂移（此前记过一版行号，一个月内全部腐化；
-摘录也漂过一次：cleanup 范例里的 `du -h` 旧口径、rdp 范例里漏 `alert` 档，均已更新）。
-定位用稳定锚点——函数名或标题文案，例如：
+本文件**不给行号**——行号会随实现漂移。定位用稳定锚点：函数名或标题文案，例如：
 
 ```bash
 rg -n 'Notify: iCloud 下载结果|def build_telegram_lines|^flush_task_preview' 范例文件
@@ -15,9 +13,8 @@ rg -n 'Notify: iCloud 下载结果|def build_telegram_lines|^flush_task_preview'
 | 1 | 最简单 | `icloud-photos-downloader.yml` 的 step `Notify: iCloud 下载结果` | `github_backup_all.yml` 通知 step（case 四态） |
 | 2 | 条目清单 | `tg-channel/cleanup_ytdlp_residual.sh` 的 FILE_DETAILS 管线 | `openlist/sync_notify.sh` 的 `_notify_add_excludes` / `fix_total` 分节 |
 | 3 | `<pre>` 块 | `openclaw.yml` 的 `send_telegram_alert()` | `openlist/sync_marker.sh` 的 `▸ 强制同步` 命令块（`file_split.sh` 的 `tg_add_pre` 同形态） |
-| 4 | 最复杂（进度面板） | `openlist/sync_progress.sh` 的终态判定段（搜 `⛔ 同步中断`） | `openlist/task_preview.sh` 的 `flush_task_preview` |
-| 5 | pwsh | `rdp.yml` 的 `Send-TgMessage` 入口通知 | `tailscale-windows.yml` 的 Notify step |
-| 6 | python | `proxy-speedtest/speedtest.py` 的 `build_telegram_lines()` | `taier_speedtest.py` 的 `notify_best_effort` |
+| 4 | pwsh | `rdp.yml` 的 `Send-TgMessage` 入口通知 | `tailscale-windows.yml` 的 Notify step |
+| 5 | python | `proxy-speedtest/speedtest.py` 的 `build_telegram_lines()` | `taier_speedtest.py` 的 `notify_best_effort` |
 
 ---
 
@@ -39,7 +36,7 @@ rg -n 'Notify: iCloud 下载结果|def build_telegram_lines|^flush_task_preview'
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
           case "${{ job.status }}" in
             # 状态语义由标题 emoji 承担即可，kv 值里再带一个就成了重复（规范 · 结果通知）
-            success)   _emoji="☁️"; _status="完成" ;;
+            success)   _emoji="✅"; _status="完成" ;;
             cancelled) _emoji="⛔"; _status="已取消" ;;
             *)         _emoji="❌"; _status="失败" ;;
           esac
@@ -100,18 +97,7 @@ send_tg_chunked "$msg"
 
 复制即用命令块的固定形态看 `openlist/sync_marker.sh` 的 `▸ 强制同步` 段：`tg_add_note "▸ 描述"` + `tg_add_pre "命令"` 成对出现（`file_split.sh` 的 `tg_add_pre` 同形态）。
 
-## 4. 进度面板（最复杂，全库唯一原地刷新）
-
-`openlist/sync_progress.sh` 的终态判定段（搜 `⛔ 同步中断`）：
-
-- 终态判定**按严重度排序**：⛔ 中断 > ⚠️ 有失败 > ✅ 带修复 > ✅ 完全完成。注释解释了为什么「中断」必须排在「失败」之前——顺序错了读者会误以为整轮跑完。
-- 四组任务列表（待处理 / 已完成 / 已跳过 / 失败）**故意不折叠**（只调 `tree_lines`）——面板要一眼看全，这是合规的刻意例外。
-- 时长**只从 `tg_add_footer` 出**（旧的「⏱️ 已用：」写法已废除）。
-- 刷新走「删旧 + 发新」而非 `editMessageText`，配 `flock` 防孤儿消息（搜 `flock`，`progress_finalize` 与 `_tg_ensure_bottom_message` 都在临界区内）。
-
-「一个分节 + 一段预渲染树」的极简骨架看 `openlist/task_preview.sh` 的 `flush_task_preview` 内 `📊 同步对` 分节（主干只有几行，复杂排版都在辅助函数里）。
-
-## 5. pwsh
+## 4. pwsh
 
 `rdp.yml` 的 `Send-TgMessage` 入口通知（十几行示范了 pwsh 侧全部规矩，逐字）：
 
@@ -133,23 +119,23 @@ if ($footer) { $msg += "`n`n$footer" }
 Send-TgMessage $msg "alert"
 ```
 
-**学什么**：dot-source 后必须 `Get-Command` 自检；分节 emoji 不与标题 emoji 重复；首个分节紧跟分隔线**不补空行**；`Get-TgFooter` 可能返回空（无 `TG_RUN_URL` 时降级），必须判空再拼；树形前缀包 `<code>` 等宽、告警显式传 `"alert"` 档。（此段旧摘录缺 `alert` 档与树形 `<code>` 前缀，已按实现更新。）
+**学什么**：dot-source 后必须 `Get-Command` 自检；分节 emoji 不与标题 emoji 重复；首个分节紧跟分隔线**不补空行**；`Get-TgFooter` 可能返回空（无 `TG_RUN_URL` 时降级），必须判空再拼；树形前缀包 `<code>` 等宽、告警显式传 `"alert"` 档。
 
 多分节 + 条件分组 + 外部 API 失败逐项降级看 `tailscale-windows.yml` 的 Notify step（说明段必须排在 kv 之后）。
 
-## 6. python
+## 5. python
 
 `proxy-speedtest/speedtest.py` 的 `build_telegram_lines()` 是 python 侧完整参考实现，逐行注释标了规范章节。四个必学点：
 
 1. 标题 emoji 随结论降级（0 可用节点 → ⚠️，不再恒 ✅）；
-2. 折叠上限统一取 **8**（此前本域用 5，与 `tree_fold` 默认值不一致，是显式收敛过的）；
+2. 折叠上限统一取 **8**，与 `tree_fold` 默认值一致；
 3. 折叠行并入条目流，末条 `└─` 由最后的循环统一决定（禁双 `└─`）；
-4. 收尾区**固定一个空行**（曾连写两个 `append('')` 变双空行，见 `taier_speedtest.py` 订阅分节末尾的收尾注释）。
+4. 收尾区**固定一个空行**，不要连写两个 `append('')`。
 
 异常兜底通知的最小骨架看 `taier_speedtest.py` 的 `notify_best_effort`（含 `abort_notify` 调用点，十余行）：发送前先恢复环境（撤 TUN），否则 API 都送不出去；原始异常串属机器值 → `tg_entry`；兜底分支必须走 `notify_best_effort`，直接 `send_telegram(...)` 后 `except: pass` 会让 400/429 变成静默消失。
 
 ## 反例（别学）
 
 - `tg-channel/sync_to_tg.sh` 的 `notify()`：为了让 python 已拼好的正文复用 bash 的 `tg_add_footer`，它 `bash -c` 起子进程把整条消息塞进 `shlex.quote`。代价是正文完全绕过 `tg_add_*` 助手、跨语言桥接脆弱、每发一条启一个 bash。**python 侧就用 `speedtest_common` 的镜像助手，不要绕回 bash。**
-- 失败清单曾把 `file_fix` 的日志片段灌成「修复过程」子行（单文件 15+ 行，含源/目标全路径、rclone 原始报错与内部机制术语），是通知里最难看的形态——2026-09-12 已删。失败原因一律写进条目行元数据、一句人话说完（规范 · 说人话），过程细节留给运行日志链接。
+- 失败清单曾把 `file_fix` 的日志片段灌成「修复过程」子行（单文件 15+ 行，含源/目标全路径、rclone 原始报错与内部机制术语），是通知里最难看的形态，已删除。失败原因一律写进条目行元数据、一句人话说完（规范 · 说人话），过程细节留给运行日志链接。
 - `upload-video-to-tg.yml` 的 `TG_CHANNEL_ID` env 硬编码频道 ID（不是通知收件人，不违反通知规范，但 hygiene 上应用 secret——同仓库 `ph-dl.yml` 走的就是 secret）。

@@ -277,10 +277,14 @@ jobs:
             rm -f /tmp/uploaded_videos.final.txt
           fi
 
+          # 逐条构造成员条目（文件名 · 大小 · URL），交给 tree_fold 统一截断；
+          # 不再把整行塞进 <code>（规范 · 条目与树形）
+          FILE_LIST=""
           if [ -f new_downloads_list.txt ]; then
-            FILE_LIST=$(cat new_downloads_list.txt)
-          else
-            FILE_LIST="无"
+            while IFS=$'\t' read -r _n _s _u || [ -n "${_n:-}" ]; do
+              [ -z "$_n" ] && continue
+              FILE_LIST+="$(tg_entry "$_n" "$_s" "$_u")"$'\n'
+            done < new_downloads_list.txt
           fi
 
           printf '%s\n' "汇总统计并发送通知" > /tmp/ph-dl-stage
@@ -305,9 +309,10 @@ jobs:
           tg_add_kv msg "本次下载" "${DOWNLOAD_COUNT} 个视频"
           # du 输出属机器返回值 → 等宽（规范 · 取值行口径）
           tg_add_path msg "磁盘占用" "${BEFORE_SIZE_H} → ${AFTER_SIZE_H}"
-          if [ "$FILE_LIST" != "无" ]; then
-            tg_add_section msg "📋 本次新增 · ${DOWNLOAD_COUNT}"
-            tg_add_block msg "$(tree_code_fold "$FILE_LIST")"
+          if [ -n "$FILE_LIST" ]; then
+            _file_n=$(printf '%s\n' "$FILE_LIST" | { grep -c . || true; })
+            tg_add_section msg "📋 本次新增 · ${_file_n}"
+            tg_add_block msg "$(tree_fold "${FILE_LIST%$'\n'}")"
           fi
           tg_add_footer msg
           send_tg_chunked "$msg"

@@ -129,7 +129,7 @@ bash skills/telegram-notify-audit/scripts/list_notify.sh openlist # 只看某个
 ### 2.5 条目与树形
 
 ```
-  ├─ <code>video_a.mp4</code> · 1.7 GB · 2160p
+  ├─ <code>video_a.mp4</code> · 1.700 GiB · 2160p
   └─ <code>video_b.mp4</code> · 重试修复失败
 ```
 
@@ -251,6 +251,8 @@ env:
 | 告警通知 | 归档失败、网关启动失败、存储失效 | 对象机器值 + 结论原因裸文本 + `<pre>` |
 | 入口与凭据 | Runner 就绪推 SSH / RDP / 出口网络、改密回执 | 按套分节，整节同为等宽机器值 |
 | 进度面板 | openlist 同步进度原地刷新 | 唯一需要 message_id 的场景 |
+| 生命周期播报 | 交接五态、停机倒计时、新 run 启动 | 标题写阶段，kv 说服务是否可用与预计时间；普通档 |
+| 常驻服务报告 | 健康看门狗、看板、网关哨兵 | 无 run 上下文，收尾区用 `🕒` 报告时刻 |
 | 带动作行 | 播放通知的「▶ 打开直链」 | 正文与动作行之间补一个空行 |
 | 媒体 caption | 随视频发出的说明 | 无标题 / 分隔线 / 收尾区 |
 
@@ -293,8 +295,8 @@ send_tg "$msg" || echo "::warning::TG 通知发送失败（不影响任务）"
 ```
 📋 处理结果 · 3
 📁 onedrive:media
-  ├─ <code>电影/A.mkv</code> · 3.1 GiB
-  └─ <code>电影/B.mkv</code> · 800 MiB
+  ├─ <code>电影/A.mkv</code> · 3.100 GiB
+  └─ <code>电影/B.mkv</code> · 800.000 MiB
 
 📁 onedrive:backup
     ├─ <code>aliyundriveCrypt/backup</code> · 源端 36.065 GiB / 1415 文件 · +7.268 GiB / +2 文件
@@ -424,13 +426,13 @@ Telegram 收到，放弃重试只会让凭据丢失。
 时间预算到站，剩余任务下轮自动接力
 
 🔄 进行中 · 2
-  ├─ <code>onedrive:media/电影</code> · 3.1 GiB / 12 文件
-  └─ <code>onedrive:media/剧集</code> · 800 MiB / 5 文件
+  ├─ <code>onedrive:media/电影</code> · 3.100 GiB / 12 文件
+  └─ <code>onedrive:media/剧集</code> · 800.000 MiB / 5 文件
 
 ⏱ 已运行 45 分钟 · 🔗 运行日志
 ```
 
-面板是**唯一需要 message_id 的场景**（删旧 + 发新），也是唯一允许绕过发送层直连 API
+面板是**唯一需要 message_id 的场景**（删旧 + 发新），也是唯一需要直连 sendMessage API
 的地方；并发刷新用锁串行化，否则会产生孤儿面板消息。
 
 ### 3.8 带动作行的通知
@@ -441,7 +443,7 @@ Telegram 收到，放弃重试只会让凭据丢失。
 ### 3.9 媒体 caption
 
 随视频发出的 caption：**没有标题、分隔线、收尾区**，三行依次为文件名 / 大小 / 修改时间
-（东八区），分片场景中间行写 `part 2/3 (800 MiB)`：
+（东八区），分片场景中间行写 `part 2/3 (800.000 MiB)`：
 
 ```
 video_2026.mp4
@@ -454,6 +456,46 @@ parse_mode**；429 重试与发送层同口径（最多 5 次）。`sendDocument
 caption 用单行 `📁 任务 · 错误日志`。
 
 ---
+
+### 3.10 生命周期播报
+
+交接、停机、接力这类「过程状态」通知：标题写阶段，kv 只回答**现在能不能用 / 还要多久**，
+不重复实现细节。
+
+```
+🤝 OpenClaw 交接 · 准备中
+━━━━━━━━━━━━━━━━━━
+阶段：继任者已启动，正在恢复基座并预热链路
+预计交出：约 12 分钟后
+
+此阶段服务完全在线，可正常使用；停机会在交出前单独提示。
+
+⏱ 已运行 3 小时 20 分 · 🔗 运行日志
+```
+
+- 阶段推进用不同 emoji（🤝 准备 / ✅ 就绪 / ⏳ 已交出 / 🚀 入口恢复 / 🏁 全部完成），
+  同一条通知内不复用。
+- 「服务是否可用」必须写清楚：可用 / 下线窗口 / 已恢复。
+- 预计时间用「约 N 分钟后」，已发生用 `tg_format_ms`；不要混用。
+
+### 3.11 常驻服务报告
+
+无 run 上下文的常驻服务（健康看门狗、看板、网关哨兵）没有「已运行」语义，收尾区固定为
+报告时刻：
+
+```
+✅ 系统健康正常
+━━━━━━━━━━━━━━━━━━
+主机：<code>runner-01</code>
+
+全部检查项通过
+
+🕒 2026-11-06 19:32（东八区）
+```
+
+- `🕒` 只用于这里，不与 `⏱` 混用。
+- 报告时刻用东八区，格式 `YYYY-MM-DD HH:MM（东八区）`。
+- 恢复通知与故障通知分开发；故障 alert、恢复普通（见台账）。
 
 ## 4. 表达约定
 
@@ -479,9 +521,10 @@ caption 用单行 `📁 任务 · 错误日志`。
 
 ### 4.2 大小
 
-1024 进制 + 三位小数 + IEC 单位：`1.150 GiB`、`800 MiB`、`12.00 KiB`。
+1024 进制 + 三位小数 + IEC 单位：`1.150 GiB`、`800.000 MiB`、`12.000 KiB`。
 不要 `du -h` 的 `1G`，也不要裸字节。
 
+- **例外**：进度面板批次行用紧凑 `4.79G`（定宽对齐、不走 `format_bytes`），只此一处。
 - bash 侧唯一实现：真源 `format_bytes`（source 真源后直接用）。
 - python 侧两份同口径 `human_size`：`sync_to_tg.sh` 内嵌（进入通知）与
   `add_uploaded_video.py`（只写台账 / 日志）。改口径要同步。
@@ -489,7 +532,7 @@ caption 用单行 `📁 任务 · 错误日志`。
 
 ### 4.3 日期与相对时间
 
-`YYYY-MM-DD HH:MM（东八区）` + ` · N 小时前`（解析失败保留原值）：
+`YYYY-MM-DD HH:MM（东八区）` + ` · N 小时前`（解析失败写「未知」，原始值只留日志）：
 
 ```
 时间：2026-09-07 19:34（东八区） · 3 小时前
@@ -671,7 +714,7 @@ wb_notify() {                    # 函数体只用助手，不再 source
 > 判断仓库接的是哪个 bot 只能看消息头。也不要把本机裸变量 `TELEGRAM_BOT_TOKEN` 改值——
 > 那是本机重要通知的出口。
 
-已知差异（现状，修完可删）：pwsh 无分片；python 429 耗尽抛异常而非返回字典；python
+已知差异（当前实现）：pwsh 无分片；python 429 耗尽抛异常而非返回字典；python
 分片不带标签闭合。
 
 ---
@@ -683,7 +726,7 @@ wb_notify() {                    # 函数体只用助手，不再 source
 ```bash
 source .github/scripts/telegram/tg_notify.sh
 msg=""; tg_add_title msg "⚠️ 示例"; tg_add_section msg "❌ 清单 · 2"
-tg_add_block msg "$(tree_lines "$(tg_entry "a.mp4" "1.7 GB")")"
+tg_add_block msg "$(tree_lines "$(tg_entry "a.mp4" "1.700 GiB")")"
 tg_add_footer msg; printf '%s\n' "$msg"
 
 bash skills/telegram-notify-audit/scripts/render_preview.sh        # 真源渲染 + 16 项自动校验

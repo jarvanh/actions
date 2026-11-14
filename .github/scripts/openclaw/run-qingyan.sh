@@ -20,6 +20,7 @@
     set -uo pipefail
     # 通知真源在 step 顶层 source 一次（勿挪进函数体，理由见 workbuddy 步骤同名注释 / 规范 · 通知函数的正确接法）
     source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+    source "${GITHUB_WORKSPACE}/.github/scripts/openclaw/notify_common.sh"
 
     DEPLOY="${GITHUB_WORKSPACE}/.github/scripts/services/qingyan_deploy.sh"
     SERVICES="${GITHUB_WORKSPACE}/.github/scripts/services/services.sh"
@@ -41,8 +42,7 @@
       tg_add_kv _m "结论" "未部署"
       tg_add_kv _m "原因" "$GL_REASON"
       tg_add_kv _m "如何配置" "仓库 Settings → Secrets → 新增 GLM_REFRESH_TOKEN（取法见脚本 login 指引）"
-      tg_add_footer _m
-      send_tg "$_m" || echo "::warning::TG 通知发送失败（不影响任务）"
+      gw_send _m "" || echo "::warning::TG 通知发送失败（不影响任务）"
       exit 0
     fi
 
@@ -152,8 +152,7 @@
       tg_add_kv _m "原因" "$GL_REASON"
       tg_add_path _m "运行目录" "/dropbox/self-hosted/qingyan-proxy/app"
       tg_add_path _m "日志" "/dropbox/self-hosted/qingyan-proxy/logs/qingyan.log"
-      tg_add_footer _m
-      send_tg "$_m" alert || echo "::warning::TG 通知发送失败（不影响任务）"
+      gw_send _m alert || echo "::warning::TG 通知发送失败（不影响任务）"
     else
       _m=""
       # 2026-10-11 标题对齐全库网关就绪约定：🟢（对齐 workbuddy/zcode2api/trae/Runner，见 docs/telegram-notify.md）
@@ -187,7 +186,7 @@
         # 不能用 tree_lines —— 它把每行都当兄弟条目，子行会被渲染成 ├─/└─
         # 与条目平级（规范 · 二层列表要求子行与条目正文同列）。
         _gl_rows=""
-        _gl_rows+="$(tree_conn 1)$(tg_entry "$(printf '%s' "$GL_SCORE")" "今日已消耗 $(printf '%s' "$GL_DAY_TOTAL")")"$'\n'
+        _gl_rows+="$(tree_conn 1)$(tg_entry_text "$(printf '%s' "$GL_SCORE")" "今日已消耗 $(printf '%s' "$GL_DAY_TOTAL")")"$'\n'
         [ -n "${GL_ROUND_DELTA:-}" ] && _gl_rows+="$(tree_sub 1)$(escape_html "本轮消耗 ${GL_ROUND_DELTA}（自检产生）")"$'\n'
         # 到期：最近一批 + 7 天内将过期的总额。「-」表示没有带有效期的入账，
         # 此时整行省略——不把「没取到」渲染成「00-00 到期」。净额模式下数值
@@ -213,10 +212,8 @@
       # 用量 + 流水（信息层面对齐 wb/zcode 通知，主人 2026-10-11 要求）：
       # 调 board.py CLI 与看板共用渲染代码；qingyan 走访问日志+快照特例，
       # 无数据时输出空串静默跳过（与 wb/zcode 同口径）。
-      _qy_ul_block="$(python3 /dropbox/self-hosted/quota-board/board.py usage-ledger qingyan 12 2>/dev/null || true)"
-      [ -n "$_qy_ul_block" ] && tg_append _m "$_qy_ul_block"
-      tg_add_footer _m
-      send_tg "$_m" alert || echo "::warning::TG 通知发送失败（不影响任务）"
+      gw_add_board_usage _m qingyan 12
+      gw_send _m alert || echo "::warning::TG 通知发送失败（不影响任务）"
     fi
   )
   _up_rc=$?

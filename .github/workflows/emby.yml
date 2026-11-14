@@ -469,9 +469,8 @@ jobs:
           tg_add_kv PW_MSG "场景" "⚠️ $PW_DESC · 本条仅本轮有效"
           tg_add_path PW_MSG "用户名" "admin"
           tg_add_path PW_MSG "密码" "$PW_VAL"
-          # 入口是**链接** → <a>（规范 · 取值行口径）：套 <code> 会让它不可点击，只能手抄域名。
-          # tg_add_kv 会转义整值、把标签变成 &lt;a&gt;，故这里用 tg_append 自行转义
-          tg_append PW_MSG "入口：🔗 <a href=\"$(escape_html "https://oe.${VD}.eu.org")\">OpenList 后台</a>"$'\n'
+          # 入口是**链接** → tg_add_link（自动转义，<code> 不可点）
+          tg_add_link PW_MSG "入口" "https://oe.${VD}.eu.org" "OpenList 后台"
           tg_add_note PW_MSG "长期有效密码 = OPENLIST_ADMIN_PASSWORD · 下轮自动恢复为它 · 本条不会出现在公开日志"
           tg_add_footer PW_MSG
           send_tg "$PW_MSG" alert \

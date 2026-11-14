@@ -23,6 +23,7 @@
     # 函数表，会把调用点对 send_tg 的本地覆写还原掉；而且子 shell 里 `local`
     # 管不住父 shell 的变量（规范 · 通知函数的正确接法）。
     source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+    source "${GITHUB_WORKSPACE}/.github/scripts/openclaw/notify_common.sh"
 
     # workbuddy-gateway（jarvanh/workbuddy-gateway）：纯 Go 单二进制的本地 AI 代理网关。
     # 运行目录整体落本地盘，Dropbox 只做持久化存放 —— 与 OpenClaw/CliRelay 同口径。
@@ -119,7 +120,7 @@
           local _readyflag _cf _st _state _acdl _quota _fm _cdl _tok _n_acc _rows _i _sub _x _last
           local _names _n_names _m _mline
           _n_acc="$(printf '%s\n' "$WB_POOL" | grep -c . || true)"
-          tg_add_section _msg "💳 账号池 · ${_n_acc}"
+          gw_add_pool_section _msg "${_n_acc}"
           _rows=""
           _i=0
           while IFS="$(printf '\t')" read -r _readyflag _cf _st _state _acdl _quota _fm _cdl _tok; do
@@ -233,16 +234,10 @@
         # （那版仅收尾回推，实测落后 4 小时丢 93% 行）。文件缺失时 CLI 输出空串，静默跳过。
         # 资产段（签到汇总 + 额度刷新）：路线 B（2026-11-01 主人拍板）——口径
         # 真源在看板，通知只引用 assets CLI 输出，看板改措辞自动跟上。
-        _wb_assets="$(python3 /dropbox/self-hosted/quota-board/board.py assets workbuddy 2>/dev/null || true)"
-        [ -n "$_wb_assets" ] && tg_append _msg "$_wb_assets"
-        _wb_ul_block="$(python3 /dropbox/self-hosted/quota-board/board.py usage-ledger workbuddy 12 2>/dev/null || true)"
-        [ -n "$_wb_ul_block" ] && tg_append _msg "$_wb_ul_block"
-        if [ -n "$6" ]; then
-          tg_add_section _msg "🧾 原始输出"
-          tg_add_pre _msg "$(tg_tail_safe "$6" 1200)"
-        fi
-        tg_add_footer _msg
-        if send_tg "$_msg" alert; then
+        gw_add_board_assets _msg workbuddy
+        gw_add_board_usage _msg workbuddy 12
+        gw_add_original_output _msg "$6"
+        if gw_send _msg alert; then
           WB_NOTIFY_OK=1
         else
           echo "::warning::TG 通知发送失败（不影响任务）"

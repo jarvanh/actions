@@ -34,8 +34,8 @@
 # 通用 Telegram 消息发送（静默，不返回 message_id）
 # 用法: send_telegram_message <message> [parse_mode=HTML]
 # 消息内容必须已按 HTML 规则转义（推荐用上方 tg_* 助手构建）
-# 统一走发送层：429 限流重试（send_tg 内建）；HTML 解析失败直接报错不重发，
-# 超 4000 字符自动分片（send_tg_chunked）
+# 统一走发送层：429 限流重试（send_tg 内建）；HTML 解析失败直接报错不重发；
+# 超长自动分片（send_tg 内建，>3900 UTF-16 码元）
 # disable_web_page_preview 必须带上：收尾区"运行日志"是消息里唯一的链接，
 # 缺了它 Telegram 会在消息下方渲染 GitHub 页面预览卡片（与 tg_notify.sh 同参数）
 send_telegram_message() {
@@ -45,10 +45,6 @@ send_telegram_message() {
   [ -z "$message" ] && return 0
   # 不再吞掉 stderr：发送层已把失败原因（429 重试耗尽 / 400 解析失败 / 其它 API 错误）
   # 写到 stderr，>/dev/null 会让「通知静默消失」无法定位（规范 · 发送层）
-  if [ "${#message}" -gt 4000 ]; then
-    send_tg_chunked "$message" "$tier" || true
-    return 0
-  fi
   send_tg "$message" "$tier" || true
 }
 

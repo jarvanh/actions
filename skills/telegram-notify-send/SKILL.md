@@ -18,7 +18,7 @@ agent_created: true
 | pwsh 实现（**只有 5 个成员**） | `.github/scripts/telegram/tg_notify.ps1` |
 | python 实现（镜像函数） | `.github/scripts/proxy-speedtest/speedtest_common.py` |
 
-写之前先读 `docs/telegram-notify.md` 的「版式构件」与「发送层」两章。只有三处是**硬约束**（发送层、收尾区、验证与交付），其余是「建议 + 为什么 + 反例」——不要把风格建议说成军规，但硬约束没有例外条款。
+写之前先读 `docs/telegram-notify.md` 的「版式构件」与「发送层」两章。只有四处是**硬约束**（收尾区、接线、发送层、验证与交付），其余是「建议 + 为什么 + 反例」——不要把风格建议说成军规，但硬约束没有例外条款。
 
 ## 第 1 步：选实现
 
@@ -143,5 +143,5 @@ send_tg "$msg" || echo "::warning::TG 通知发送失败（不影响任务）"
 ## 参考文件
 
 - `references/api-reference.md`——构件速查（三套实现对照、签名、折叠规则、时长/大小格式、状态图标）
-- `references/examples.md`——6 类真实范例（均摘自本仓库，附路径行号）
+- `references/examples.md`——5 类真实范例（均摘自本仓库，用函数名/标题锚点定位）
 - `scripts/scaffold_notify.sh`——按场景生成骨架，省得手写

@@ -270,7 +270,10 @@ _send_sync_result_notification() {
     # 提取关键错误日志
     local critical_logs="无明显错误关键字"
     if [ -f "$log_filename" ]; then
-      critical_logs=$(grep -Ei "error|failed|too large|timeout|permission denied|connection refused" "$log_filename" | tail -n 5 || echo "无明显错误关键字")
+      critical_logs=$(grep -Ei "error|failed|too large|timeout|permission denied|connection refused" "$log_filename" | tail -n 5 || true)
+      [ -n "$critical_logs" ] || critical_logs="无明显错误关键字"
+      # 尾部安全截断：裸 tail -c 会切断 UTF-8，<pre> 跨分片破版（规范 · 多行块）
+      critical_logs=$(tg_tail_safe "$critical_logs" 1200)
     fi
     local err_title err_status
     if [ "$is_partial_failure" -eq 1 ]; then

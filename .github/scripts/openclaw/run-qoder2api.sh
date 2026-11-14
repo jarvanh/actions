@@ -18,6 +18,7 @@
     set -euo pipefail
 # 通知真源在 step 顶层 source 一次（对齐 trae2api 段注释）
 source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+source "${GITHUB_WORKSPACE}/.github/scripts/openclaw/notify_common.sh"
 # TS_FQDN 由 Tailscale 步骤写入 ts.env，step 间不共享 env，需显式加载
 # （对齐 autoclaw 段写法）；缺失时看板入口两行整体跳过，不影响网关本身。
 [ -f "$HOME/ts.env" ] && . "$HOME/ts.env" || true
@@ -65,15 +66,11 @@ qoder_notify() {
       # 设计如此：API Key 明文进 TG 通知（与原展示口径一致）。
       tg_add_path _msg "API Key" "$(read_qoder_key | grep . || echo 未取到)"
       # 资产段（签到汇总）：路线 B —— 口径真源在看板（2026-11-01）。
-      _qd_assets="$(python3 /dropbox/self-hosted/quota-board/board.py assets qoder 2>/dev/null || true)"
-      [ -n "$_qd_assets" ] && tg_append _msg "$_qd_assets"
+      gw_add_board_assets _msg qoder
     fi
     [ -n "$5" ] && tg_add_kv _msg "原因" "$5"
-    if [ -n "$6" ]; then
-      tg_add_pre _msg "$(tg_tail_safe "$6" 1200)"
-    fi
-    tg_add_footer _msg
-    if send_tg "$_msg" alert; then
+    gw_add_original_output _msg "$6"
+    if gw_send _msg alert; then
       QODER_NOTIFY_OK=1
     else
       echo "::warning::TG 通知发送失败（不影响任务）"

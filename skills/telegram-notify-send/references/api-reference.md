@@ -1,49 +1,35 @@
 # 通知构件速查
 
-本表**不给行号**——行号会随实现漂移（此前记过一版 2026-09-12 的行号，一个月内 bash 列
-整体漂了 +8~+34 行、python 列漂了 +116 行，全部腐化）。函数名是稳定锚点，定位用：
+本文件只记**签名与易错点**。版式规则、折叠判据、时长 / 大小 / 日期口径、状态图标
+一律以 [`docs/telegram-notify.md`](../../../docs/telegram-notify.md) 为唯一真源，本文不重复。
+
+定位函数用 grep，不记行号（行号必漂）：
 
 ```bash
 grep -nE '^(函数名)\(\)|^def 函数名|^function 函数名|\$?TG_SEP *=' 真源文件
 ```
 
-## 1. 三套实现对照
+## 1. 三套实现边界
 
-| 用途 | bash `tg_notify.sh` | pwsh `tg_notify.ps1` | python `speedtest_common.py` |
+| | bash `tg_notify.sh` | pwsh `tg_notify.ps1` | python `speedtest_common.py` |
 |---|---|---|---|
+| 适用 | Linux / macOS runner | Windows runner | python 脚本 |
+| 排版助手 | 全套 `tg_add_*` / `tg_entry*` / `tree_*` | 无，全部手拼 | 返回字符串的镜像函数，自己 `join` |
+| 大小 / 耗时 | `format_bytes` / `tg_format_ms` / `tg_format_duration` | `Format-TgDuration` | `tg_format_elapsed`；**无大小助手** |
+| 发送 | `send_tg` / `send_tg_chunked`（可选 `tier`） | `Send-TgMessage <text> [tier]`，无分片 | `send_telegram` / `send_telegram_chunked`（可选 `tier`） |
+| 分隔线 | `TG_SEP` | `$TG_SEP` | `TG_SEP` |
 | 转义 | `escape_html` | `Esc-Html` | `html.escape` |
-| 分隔线 18 条 | `TG_SEP` | `$TG_SEP` | `TG_SEP` |
-| 标题 | `tg_add_title` | 手拼 | 手拼 |
-| kv（裸文本值） | `tg_add_kv` | 手拼 | 手拼 |
-| kv（机器值 `<code>`） | `tg_add_path` | 手拼 | 手拼 |
-| 可点击链接 | `tg_add_link` | 手拼 `<a>` | 手拼 |
-| 分节 | `tg_add_section` | 手拼 | 手拼 |
-| 说明段 | `tg_add_note` | 手拼 | 手拼 |
-| 多行块（原样） | `tg_add_block` | — | — |
-| 多行块（`<pre>`） | `tg_add_pre` | — | `tg_pre_block` |
-| 收尾区 | `tg_add_footer` | `Get-TgFooter` | `tg_footer_line` |
-| 条目（单行，无尾换行） | `tg_entry` | — | `tg_entry` |
-| 条目（累积，含尾换行） | `tg_add_entry` | — | 自己 join |
-| 条目（文字主体） | `tg_entry_text` / `tg_add_entry_text` | — | `tg_entry(..., code=False)` |
-| 条目（双机器值 `→`） | `tg_entry_pair` / `tg_add_entry_pair` | — | `tg_entry_pair` |
-| 条目（双机器值 `·`） | `tg_entry_codes` / `tg_add_entry_codes` | — | `tg_entry_codes` |
-| 树形前缀 | `tree_conn` / `tree_sub` | 手写 `  ├─ ` `  └─ ` | 手写 |
-| 多行 → 树形 | `tree_lines` | — | — |
-| 折叠（裸文本） | `tree_code_fold` | — | — |
-| 折叠（已构建条目流） | `tree_fold` | — | — |
-| 时长格式化（收尾三段式） | `tg_add_footer` 内置 | `Format-TgDuration` | `tg_format_elapsed` |
-| 耗时（正文单条，毫秒/秒双档） | `tg_format_ms` | —（无消费场景） | —（延迟走指标串例外） |
-| 发送 | `send_tg` / `send_tg_chunked`（可选 `tier`） | `Send-TgMessage <text> [tier]` | `send_telegram` / `send_telegram_chunked`（可选 `tier`，alert 无回落与 bash 同语义） |
-| 原样追加（**不转义**） | `tg_append` | — | — |
 
-pwsh 侧**只有 5 个成员**（`$TG_SEP` / `Esc-Html` / `Format-TgDuration` / `Get-TgFooter` / `Send-TgMessage`），没有第六个。全库 dot-source 它的只有 `rdp.yml` 与 `tailscale-windows.yml`。
+pwsh 只有 **5 个成员**：`$TG_SEP` / `Esc-Html` / `Format-TgDuration` / `Get-TgFooter` /
+`Send-TgMessage`。全库 dot-source 它的只有 `rdp.yml` 与 `tailscale-windows.yml`。
 
-## 2. bash 函数签名（易记错的部分）
+## 2. bash 签名（易记错的部分）
 
 ```bash
 tg_append      <变量名> <原始文本>          # 第一参是变量名不是值；不转义
 tg_add_kv      <变量名> <标签> <值>          # 值转义，输出 "标签：值"
 tg_add_path    <变量名> <标签> <值>          # 值转义 + <code>
+tg_add_link    <变量名> <标签> <URL> <文本>   # <a href>，文本与 URL 都转义
 tg_add_footer  <变量名> ["标签" "URL"]...    # 附加链接对
 tg_entry       <主体> [元数据...]            # 单行，无尾换行
 tg_add_entry   <变量名> <主体> [元数据...]    # 2 必填 + 变长元数据，追加一整行
@@ -53,83 +39,31 @@ tree_code_fold <多行裸文本> [上限=8]          # 转义 + <code> + 截断
 ```
 
 - `tg_add_*` 的第一参都是**变量名**（内部 `printf -v` + `${!1}`），写 `tg_add_title "$msg"` 是错的。
-- `tg_add_entry` 的主体收**裸文本**，内部才包 `<code>` 并转义。
-- `tg_add_footer` 的附加链接只在 `TG_RUN_URL` 非空时才追加；两者都缺则整个收尾区跳过（`return 0`）。
-- `send_tg` 空文本直接 `return 0`。`_tg_send_once` 返回 `2` 表示 HTML 解析失败（400，不重发）。
+- `tg_add_entry` 的主体收**裸文本**，内部才包 `<code>` 并转义；预先包好会二次转义。
+- `tg_add_footer` 必须对**已积累正文**的变量原地追加；附加链接只在 `TG_RUN_URL` 非空时追加。
+- `send_tg` 空文本直接 `return 0`；`_tg_send_once` 返回 `2` 表示 HTML 解析失败（400，不重发）。
 
-## 3. 折叠规则
-
-两个助手按**输入**选，不可互换：
+## 3. 两个折叠助手
 
 | 助手 | 输入 | 做什么 |
 |---|---|---|
-| `tree_code_fold` | 裸文本（未转义、无标签） | 逐行转义 + `<code>` + 超 8 条折叠 |
+| `tree_code_fold` | 裸文本（未转义、无标签） | 逐行转义 + `<code>` + 超上限折叠 |
 | `tree_fold` | 已由 `tg_add_entry` / `tg_entry` 构建的条目流 | **只**截断 + 加折叠行 |
 
-折叠与否看**清单性质**，不是看长度：
+二者不可互换，误用会二次转义。折叠行并入条目流作末条（由 `tree_lines` 统一决定 `└─`），
+不要单独补一行造成双 `└─`。折叠与否看清单性质（流水折叠、结构性全量），判据见规范 · 折叠行。
 
-| 清单性质 | 超 8 条 | 例 |
-|---|---|---|
-| 流水/日志类（单条价值低） | 折叠为「还有 N 条…」 | 已上传文件、删除的重复文件、排除规则、日志行 |
-| 结构性清单（读者要逐条核对） | **全量展示** | `task_preview` 同步对、`task_engine` 子目录/批次统计、**进度面板四组任务列表** |
+## 4. 高频坑
 
-判据：折叠掉后半段会不会让读者误判。
+1. **二次转义**：对已含 `<code>` 的条目流用 `tree_code_fold` → `&` 变 `&amp;amp;`、整条 400。
+2. **尾换行被吃掉**：`$(tg_entry …)` 不输出换行，命令替换还会吃掉它 → 累积多行用 `tg_add_entry`。
+3. **footer 两步写法**：先接在空变量上再拼正文 → 空行丢失。
+4. **函数体内 source 真源**：子 shell 只改自己的函数表，调用点对 `send_tg` 的覆写会被还原。
+5. **`<pre>` 超长**：原始输出取尾部 1200 字节，用 `tg_tail_safe` / `tg_tail_file_safe`，
+   不要裸 `tail -c`（会切断 UTF-8）。
+6. **内嵌 python 段**：无法 import 共享层，用到的助手必须在本文件同义实现，漏实现会 `NameError`。
+7. **pwsh 不自检**：dot-source 后必须 `Get-Command Send-TgMessage`，否则调用未定义函数会静默消失。
+8. **python 兜底吞异常**：用 `notify_best_effort(stage, msg)`，不要 `except: pass`。
 
-`tree_fold` 只适用于**单行条目流**（一个输入行 = 一个完整条目）。带子行的二层列表（1 条目行 + N 行 `│ ` 子行）要由调用方按**条目**计数自行补折叠行——实例是 `task_preview.sh` 的条目子行与 `sync_marker.sh` 的方法摘要。子行只补一句话，**不要往里灌日志**（规范 · 说人话）——`sync_notify.sh` 的失败清单曾这么干，2026-09-12 已删。
-
-折叠行并入条目流作末条（由 `tree_lines` 统一决定 `└─`），不要单独补一行造成双 `└─`。
-
-## 4. 数值与时长格式
-
-**时长五层**（规范 · 时长）：
-
-| 形态 | 适用 | 例 |
-|---|---|---|
-| `X 小时 Y 分`（分钟不补零） | ≥ 1 小时 | `2 小时 8 分` |
-| `X 分钟` | ≥ 1 分钟 | `20 分钟` |
-| `X.XX 秒`（固定两位小数） | ≥ 1 秒 | `12.00 秒` |
-| `X 毫秒`（整数） | < 1 秒 | `27 毫秒` |
-| `⏱mm:ss`（定宽） | 进度面板批次行 | `⏱01:15` |
-
-已知例外：测速指标串里的延迟用紧凑 `NNms`（要和 `↑`/`↓` 并排）。
-
-**分片口径三套有意不同**（发送层硬约束，详见规范 · 发送层要求）：bash >3900 UTF-16 码元触发、
-按 3800 UTF-16 码元切且**分片边界自动闭合/重开 HTML 标签**；python 按 4000 Python 码点切、
-**无**标签闭合（超长 `<pre>` 破版，故原始输出按尾部 1200 字节截断）；pwsh 无分片。
-
-**大小**：1024 进制 + 三位小数 + IEC 单位 → `1.150 GiB` / `800 MiB`。bash 侧唯一实现是通知真源 `tg_notify.sh` 的 `format_bytes`，source 真源后直接用；python 侧仍有两处同义实现（`add_uploaded_video.py`、`sync_to_tg.sh` 内嵌段），改口径时要同步。**不要用 `du -h` 的 `1G`，也不要输出裸字节。**
-
-**日期**：`YYYY-MM-DD HH:MM（东八区）` + ` · N 小时前`（解析失败保留原值）。展示时间一律东八区，机器值仍存 UTC。
-
-**计数**：分节 ` · N`；中文化错误码写「退出码 45」而不是 `exit=45`。
-
-## 5. 空行规则
-
-只有这几处产生空行，其余不要手写 `\n\n`：
-
-1. `tg_add_section` 段前（紧跟标题/分隔线或空消息时自动不补）
-2. `tg_add_note` 段前
-3. `tg_add_footer` 前
-4. 正文与动作行之间（调用方补，先判断是否已有尾换行）
-5. 多组列表的组与组之间——**必须带条件**：`[ "$_gi" -gt 0 ] && _out+=$'\n'`（首组之前补会多空行）
-
-## 6. 状态图标语义
-
-`✅` 成功 · `⚠️` 部分失败/警告 · `❌` 失败 · `⏭️` 跳过 · `🔄` 进行中 · `⏳` 待处理 · `⛔` 中断 · `🚨` 危险警告 · `🆘` 灾难恢复 · `📍` 进度面板当前阶段 · `🟡` 降级但服务在 · `🟠` 需人工介入 · `🕒` 常驻服务报告时刻（只用于无 run 上下文的收尾区） · `🚫` 本轮中止（预期内收尾） · `🧯` 自动接力熔断 · `⏸️` 轮次收摊（预算到站）
-
-图标要与结论一致：0 成功 / 中止 / 数据缺失时标题应降级。**不要自造** `⭐` `🥇` 之类前缀。
-
-## 7. 回归基线（动到 openlist 域时）
-
-```bash
-cd .github/scripts/openlist/tests
-for t in test_*.sh; do bash "$t" </dev/null > "/tmp/x_${t%.sh}.log" 2>&1; echo "$t EXIT=$?"; done
-grep "command not found" /tmp/x_*.log   # 必须为空
-```
-
-判定基线：**除环境假红外全部 `EXIT=0`**（套件数会变，别记数字；具体名单以
-`skills/telegram-notify-audit/references/audit-checklist.md` 为准）。已知环境假红固定为：
-`test_truth`（依赖 docker）、`test_marker_skip_guards` 1b（macOS BSD `date` 无 `-d`）。
-全量约 10 分钟，后台跑。
-
-已知 flake（负载高时）：`test_progress_no_orphans`（时序断言）、`test_get_openlist_token_login`（sandbox IPC 超时）。**单独复跑确认再下结论，别急着改代码。**
+回归基线（openlist 域）见
+[`telegram-notify-audit/references/audit-checklist.md`](../../telegram-notify-audit/references/audit-checklist.md)。

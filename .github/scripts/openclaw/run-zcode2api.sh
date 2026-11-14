@@ -21,6 +21,7 @@
     set -uo pipefail
     # 通知真源在 step 顶层 source 一次（勿挪进函数体，理由见 workbuddy 步骤同名注释 / 规范 · 通知函数的正确接法）
     source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+    source "${GITHUB_WORKSPACE}/.github/scripts/openclaw/notify_common.sh"
 
     Z2A_REPO="https://github.com/jarvanh/zcode2api.git"
     Z2A_DATA_ARCHIVE="dropbox:self-hosted/zcode2api-data.tar.gz"
@@ -172,7 +173,7 @@
       hidden_total="$(printf '%s' "$json" | jq -r '[.accounts[] | select((.quota // {} | length) == 0)] | length' 2>/dev/null || true)"
       # 标题计数用**已展示**的条目，避免「账号池 10」却只列 1 条的口径打架；
       # 被略去的条数单独标出，主人仍知道池子里还有多少无额度账号。
-      Z2A_POOL_TITLE="💳 账号池 · ${shown_total}（可用 ${shown_active}）"
+      Z2A_POOL_TITLE="$(gw_pool_title "${shown_total}" "${shown_active}")"
       if [ "${hidden_total:-0}" -gt 0 ] 2>/dev/null; then
         Z2A_POOL_TITLE="${Z2A_POOL_TITLE} · 略 ${hidden_total} 无额度"
       fi
@@ -497,10 +498,8 @@
         tg_add_pre _m "$Z2A_TAIL"
       fi
       # 资产段（套餐到期 + 今日消耗）：路线 B —— 口径真源在看板（2026-11-01）。
-      _z2a_assets="$(python3 /dropbox/self-hosted/quota-board/board.py assets zcode 2>/dev/null || true)"
-      [ -n "$_z2a_assets" ] && tg_append _m "$_z2a_assets"
-      tg_add_footer _m
-      if send_tg "$_m" alert; then
+      gw_add_board_assets _m zcode
+      if gw_send _m alert; then
         # 风控停用留痕：发送成功才写（失败下轮重试，对齐就绪标记口径）
         if [ "$Z2A_FAIL_CLASS" = "risk_ban" ]; then
           mkdir -p "$(dirname "$Z2A_RISK_STATE_FILE")" 2>/dev/null || true
@@ -523,8 +522,7 @@
           tg_add_section _r "$Z2A_POOL_TITLE"
           tg_add_block _r "$Z2A_POOL_TEXT"
         fi
-        tg_add_footer _r
-        if send_tg "$_r" alert; then
+        if gw_send _r alert; then
           rm -f "$Z2A_RISK_STATE_FILE" 2>/dev/null || true
         else
           echo "::warning::TG 通知发送失败（不影响任务）"
@@ -562,14 +560,9 @@
         tg_add_path _m "代码" "$Z2A_REPO"
         # 用量 + 流水（看板独有，2026-10-05 补进 zcode 通知，与 wb/trae 同口径）：
         # 只渲染 zcode 自己的，调 board.py CLI 与看板共用渲染代码与数据源。
-        _z2a_ul_block="$(python3 /dropbox/self-hosted/quota-board/board.py usage-ledger zcode 12 2>/dev/null || true)"
-        # 2026-10-11 修复：此处变量是 _m（本分支消息变量），曾误写 _msg ——
-        # _msg 在本 step 未定义，tg_append 的 ${!1} 间接展开撞 set -u 直接崩整 step
-        # （run 38141881455 实锤：tg_notify.sh line 89: !1: unbound variable），
-        # zcode2api 的「已就绪」通知自 2026-10-06 (a873e07) 起从未发出过。
-        [ -n "$_z2a_ul_block" ] && tg_append _m "$_z2a_ul_block"
-        tg_add_footer _m
-        if send_tg "$_m" alert; then
+        # 用量 + 流水：看板 CLI，空输出静默跳过
+        gw_add_board_usage _m zcode 12
+        if gw_send _m alert; then
           printf '%s\n' "${GITHUB_RUN_ID:-manual}" > "$Z2A_RUN_TAG_FILE"
           if [ "$Z2A_RISK_BAN_COUNT" -gt 0 ]; then
             # 就绪卡已点名风控停用 → 同样留痕，供后续轮次补报解除

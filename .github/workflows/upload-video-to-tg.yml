@@ -114,7 +114,13 @@ jobs:
           [ -f "${RUNNER_TEMP:-/tmp}/tg-channel-summary-sent" ] && exit 0
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
           msg=""
-          tg_add_title msg "❌ 频道同步异常退出"
-          tg_add_kv msg "结果" "同步脚本未产出汇总通知（退出状态 ${SYNC_RESULT:-unknown}）"
+          case "${SYNC_RESULT:-unknown}" in
+            cancelled) _emoji="⛔"; _status="已取消" ;;
+            skipped)   _emoji="⚠️"; _status="未执行（前置步骤未通过）" ;;
+            failure)   _emoji="❌"; _status="失败" ;;
+            *)         _emoji="❌"; _status="未知（${SYNC_RESULT:-unknown}）" ;;
+          esac
+          tg_add_title msg "${_emoji} 频道同步未完成"
+          tg_add_kv msg "结果" "同步脚本未产出汇总通知（退出状态：${_status}）"
           tg_add_footer msg
           send_tg_chunked "$msg" || echo "::warning::TG 兜底通知发送失败（不影响任务）"

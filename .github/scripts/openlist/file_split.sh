@@ -69,9 +69,11 @@ send_video_split_notification() {
       ' "$log_file" 2>/dev/null || true)
       local log_summary
       if [ -n "$current_log" ]; then
-        log_summary=$(printf '%s' "$current_log" | tail -c 1200 2>/dev/null || echo "无法读取当前文件日志")
+        log_summary=$(tg_tail_safe "$current_log" 1200)
+        [ -n "$log_summary" ] || log_summary="无法读取当前文件日志"
       else
-        log_summary=$(tail -c 1200 "$log_file" 2>/dev/null || echo "无法读取日志")
+        log_summary=$(tg_tail_file_safe "$log_file" 1200)
+        [ -n "$log_summary" ] || log_summary="无法读取日志"
       fi
       # 分节后跟的是 <pre> 块而非条目列表 → 不带计数（规范 · 分节）；
       # `· 当前文件` 会被读成「N 条」，且与本文件 7z 分支的 `🧾 日志摘要` 两写法
@@ -117,7 +119,8 @@ send_binary_split_notification() {
   fi
   if [ -f "$log_file" ]; then
     local log_summary
-    log_summary=$(tail -c 1200 "$log_file" 2>/dev/null || echo "无法读取日志")
+    log_summary=$(tg_tail_file_safe "$log_file" 1200)
+    [ -n "$log_summary" ] || log_summary="无法读取日志"
     tg_add_section message "🧾 日志摘要"
     # 日志为原始输出，转义后 <pre> 等宽展示
     tg_add_pre message "$log_summary"

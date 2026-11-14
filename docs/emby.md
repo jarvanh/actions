@@ -400,7 +400,7 @@ bash skills/telegram-notify-audit/scripts/list_notify.sh   # 关注 emby.yml
 ```
 🎬 五十度飞 (2018)                                   ← 第 1 行：片名 + 年份
 ━━━━━━━━━━━━━━━━━━                                  ← 第 2 行：统一分隔线
-规格：电影 · 1 小时 58 分 · 2160p · hevc · 1.7 GB    ← 第 3 行：规格（标签锚点行）
+规格：电影 · 1 小时 58 分 · 2160p · hevc · 1.700 GiB    ← 第 3 行：规格（标签锚点行）
 链路：⚡ 302直连 OneDrive · 直链剩余 38 分钟           ← 第 4 行：链路
 客户端：<code>203.0.113.42</code> · Infuse-Direct · iPhone   ← 第 5 行：客户端
 ⏳ 起播等待 · 7                                      ← 第 6 行起：等待（访问链 KV 树）
@@ -430,9 +430,7 @@ bash skills/telegram-notify-audit/scripts/list_notify.sh   # 关注 emby.yml
 - **直链行**只在 3 分钟内才视为本次播放所用；`<a>` 折叠为「▶ 打开直链」，段前空一行。
 - 收尾区走 `tg_add_footer`：读 `TG_RUN_URL`，时长走 runner 开机时刻兜底，缺席时降级跳过。
 
-**HTML 解析失败（400 can't parse entities）不重发**：发送层 `send_tg` 直接输出错误并返回非 0；
-只有 **429 限流保留重试**（最多 5 次，按 `retry_after` 等待）。解析失败说明版式有 bug，
-退化成纯文本只会把 bug 藏起来；且两类失败都意味着上一条未被 Telegram 接收，不存在"发重复"风险。
+- 发送层行为（转义、400 不重发、429 重试）见规范 · 发送层要求，本域不另写。
 
 > 实现坑（已踩过）：TSV 用 tab 分隔会让 `read` 吃掉中间空字段（tab 是 IFS 空白字符，连续分隔符被折叠），
 > 导致电影没有 series/季集时后续字段整体前移。现改用 `\037`（单元分隔符）。

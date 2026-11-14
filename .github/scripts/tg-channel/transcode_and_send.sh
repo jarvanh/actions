@@ -7,6 +7,9 @@
 
 set +e
 
+# 版式助手真源（format_bytes）：caption 大小与全库同口径
+source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+
 LOCAL_FILE="$1"
 CHANNEL_ID="$2"
 MODTIME="$3"
@@ -140,10 +143,10 @@ if [ "$FILESIZE_BYTES" -gt "$TG_HARD_LIMIT_BYTES" ]; then
     PART="${PARTS[$i]}"
     PART_BASE=$(basename "$PART")
     PART_SIZE=$(stat -c%s "$PART" 2>/dev/null || echo 0)
-    PART_MIB=$((PART_SIZE / 1024 / 1024))
+    PART_SIZE_HUMAN=$(format_bytes "$PART_SIZE")
     PART_NUM=$((i + 1))
-    PART_CAPTION="${FILENAME}"$'\n'"part ${PART_NUM}/${#PARTS[@]} (${PART_MIB}MiB)"$'\n'"${MODTIME}"
-    echo "[split] 上传 part $((i+1))/${#PARTS[@]}: $PART_BASE (${PART_MIB}MiB)"
+    PART_CAPTION="${FILENAME}"$'\n'"part ${PART_NUM}/${#PARTS[@]} (${PART_SIZE_HUMAN})"$'\n'"${MODTIME}"
+    echo "[split] 上传 part $((i+1))/${#PARTS[@]}: $PART_BASE (${PART_SIZE_HUMAN})"
     PART_START=$SECONDS
     PART_LOG="$WORK_DIR/upload_part${PART_NUM}.log"
     if python3 "${GITHUB_WORKSPACE}/.github/scripts/tg-channel/tg_send_video.py" \
@@ -172,8 +175,6 @@ if [ ! -f "$LOCAL_FILE" ]; then
   echo "[upload] 文件不存在（可能已被切割上传），跳过: $LOCAL_FILE"
   exit 0
 fi
-# 版式助手真源（format_bytes 等）：caption 里的大小也要与全库同口径
-source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
 FILESIZE_HUMAN=$(format_bytes "$(stat -c%s "$LOCAL_FILE" 2>/dev/null || echo 0)")
 FILESIZE_BYTES=$(stat -c%s "$LOCAL_FILE" 2>/dev/null || stat -f%z "$LOCAL_FILE" 2>/dev/null || echo "unknown")
 # Caption 分三行：文件名、大小、修改时间

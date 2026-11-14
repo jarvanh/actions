@@ -127,12 +127,12 @@
 
 ## Telegram 通知
 
-主报告**普通**档；❌ / ⛔ 兜底 **alert** 档（见台账）。
+主报告**普通**档；❌ / ⛔ 兜底 **alert** 档（见台账）。标题 emoji 随结论降级：
+✅ 正常完成；⚠️ 0 可用节点、全部节点命中 bypass、或到点收摊；⛔ 信号终止；❌ 异常退出
+（标题带原因）。版式见 [`telegram-notify.md`](telegram-notify.md)，发送点用
+`list_notify.sh proxy-speedtest` 现场枚举。
 
-- `✅ CDN 测速完成`：正常完成。
-- `⚠️ CDN 测速完成`：0 可用节点、**全部可用节点命中 bypass**（结果不可信），或**到点收摊**。
-- `⛔ CDN 测速异常终止`：收到 SIGTERM / SIGINT，handler 兜底。
-- `❌ CDN 测速异常退出 · <原因>`：mihomo 启动失败 / 节点快照失败 / 未捕获异常。
+示例：`❌ CDN 测速异常退出 · mihomo 启动失败`
 
 ### 墙钟预算（到点收摊，与 gitee / taier 共用同一判据）
 

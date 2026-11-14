@@ -4,7 +4,7 @@
 #   bash skills/telegram-notify-audit/scripts/list_notify.sh [域过滤子串]
 #       枚举发送点 / 标题字面量 / 档位汇总（替代手工逐条清单）
 #   bash skills/telegram-notify-audit/scripts/list_notify.sh --check
-#       跑审计清单 1–15 项的机械校验，有 FAIL 时退出码 1
+#       跑审计清单 1–19 项的机械校验，有 FAIL 时退出码 1
 #
 # 判据:
 #   档位 —— 调用点显式传 alert 才算重要档；tier 是变量则标「动态」并提示人工确认；
@@ -26,6 +26,7 @@ EXTS = (".sh", ".yml", ".yaml", ".py", ".ps1")
 LIB_SKIP = {
     ".github/scripts/telegram/tg_notify.sh",
     ".github/scripts/openlist/telegram.sh",
+    ".github/scripts/openclaw/notify_common.sh",
     ".github/scripts/proxy-speedtest/speedtest_common.py",
 }
 
@@ -40,6 +41,7 @@ CURL_ALLOW = {
 ANY_SEND = re.compile(
     r"(?<![\w-])(send_tg_chunked|send_tg|send_telegram_message|send_telegram_chunked|send_telegram)\b"
     r"|(?<![\w-])Send-TgMessage\b"
+    r"|(?<![\w-])gw_send\b"
 )
 NOTIFY_LINE = re.compile(r"tg_add_|tg_append|send_tg|send_telegram|Send-TgMessage")
 # 真实调用（带变量/实参），用于排除 docstring 里「提到函数名」的散文
@@ -180,6 +182,15 @@ def inventory(filt):
                 else:
                     tier = args[1] if len(args) > 1 else ""
                 kind = "bash"
+
+            if kind is None:
+                # 共享网关包装层：gw_send <var> [tier]；缺省 alert（与 notify_common.sh 一致）
+                m = re.search(r"(?<![\w-])gw_send\b", cmd)
+                if m and "() {" not in cmd:
+                    rest = re.split(r"\|\||&&|;|\||\)|\bthen\b", cmd[m.end():], maxsplit=1)[0]
+                    args = bash_args(rest)
+                    tier = args[1] if len(args) > 1 else "alert"
+                    kind = "bash"
 
             if kind is None:
                 m = re.search(r"(?<![\w.])(send_telegram_chunked|send_telegram)\s*\(", cmd)
@@ -446,7 +457,7 @@ def check():
     # 7 收尾区覆盖：按作用域判定「有标题却完全没有收尾区调用」。
     # 分支汇聚（多条标题共用末尾一个 footer）在作用域内自然成立，无需人工。
     bad = []
-    foot = re.compile(r"tg_add_footer|Get-TgFooter|tg_footer_line")
+    foot = re.compile(r"tg_add_footer|Get-TgFooter|tg_footer_line|gw_send")
     for p in all_files:
         if not p.endswith((".sh", ".yml", ".yaml")):
             continue
@@ -615,7 +626,68 @@ def check():
                 bad.append(f"{p}:{i}: {l.strip()[:80]}")
     add(15, "通知里不直出 UTC", bad)
 
-    print("# Telegram 通知机械校验（审计清单 1–15 项）")
+    # 16 分节计数形式：分节后跟条目列表时，` · ` 后必须直接是计数或变量，
+    #    不能是「模型数量 N」这类文字（后跟 <pre>/kv 的分节不要求计数，跳过）
+    bad = []
+    for p in all_files:
+        lines = open(p, encoding="utf-8", errors="replace").read().split("\n")
+        for i, l in enumerate(lines):
+            s = l.strip()
+            if s.startswith("#") or "tg_add_section" not in s:
+                continue
+            m = re.search(r'tg_add_section\s+\S+\s+"([^"]*)"', s)
+            if not m:
+                continue
+            title = m.group(1)
+            # 标题里有嵌套 $() / 引号时正则只截到中途，跳过交给人工
+            if "$(" in title or " · " not in title:
+                continue
+            # 只有后跟条目列表时才要求 ` · N`
+            if not re.search(r"tree_|tg_add_entry", "\n".join(lines[i + 1:i + 8])):
+                continue
+            seg = title.split(" · ", 1)[1]
+            if re.match(r"^(\d|\$)", seg):
+                continue
+            bad.append(f"{p}:{i+1}: 分节计数不是 ` · N`：{s[:90]}")
+    add(16, "分节计数形式（· N）", bad)
+
+    # 17 通知正文不得直出 ISO / UTC：展示时间一律东八区，解析失败写「未知」
+    bad = []
+    iso = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}|\bUTC\b")
+    notify_text = re.compile(r"tg_add_|tg_append|caption=|CAPTION\s*=|notify\(|tg_pre_block")
+    for p in all_files:
+        for i, l in enumerate(open(p, encoding="utf-8", errors="replace").read().split("\n"), 1):
+            if l.strip().startswith("#") or not notify_text.search(l):
+                continue
+            if iso.search(l):
+                bad.append(f"{p}:{i}: 通知正文直出 ISO/UTC：{l.strip()[:90]}")
+    add(17, "通知正文不直出 ISO/UTC", bad)
+
+    # 18 媒体 caption 的大小必须走 format_bytes，不能另写整数 MiB
+    bad = []
+    for p in all_files:
+        for i, l in enumerate(open(p, encoding="utf-8", errors="replace").read().split("\n"), 1):
+            if l.strip().startswith("#") or not re.search(r"(?:PART_)?CAPTION\s*=", l):
+                continue
+            if re.search(r"\b(?:MiB|GiB|MB|GB)\b", l):
+                bad.append(f"{p}:{i}: caption 大小未走 format_bytes：{l.strip()[:90]}")
+    add(18, "caption 大小走 format_bytes", bad)
+
+    # 19 文档里的通知示例必须用 IEC 三位小数，不得出现 1.7 GB 这类旧口径
+    bad = []
+    for p in ("docs/telegram-notify.md",
+              "skills/telegram-notify-send/references/api-reference.md",
+              "skills/telegram-notify-send/references/examples.md"):
+        try:
+            lines = open(p, encoding="utf-8").read().split("\n")
+        except OSError:
+            continue
+        for i, l in enumerate(lines, 1):
+            if re.search(r"\d+(?:\.\d+)?\s*(?:GB|MB|KB|TB)\b", l):
+                bad.append(f"{p}:{i}: 示例大小应用 IEC：{l.strip()[:90]}")
+    add(19, "文档示例大小用 IEC", bad)
+
+    print("# Telegram 通知机械校验（审计清单 1–19 项）")
     print(f"# 仓库: {root}")
     print()
     fails = 0

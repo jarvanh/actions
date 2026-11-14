@@ -79,7 +79,11 @@ case "$stage" in
     [ -n "${KV[ai_ready]:-}" ] && tg_add_kv msg "AI 网关恢复" "$(tg_format_ms "${KV[ai_ready]}")"
     [ -n "${KV[chat]:-}" ] && tg_add_kv msg "聊天入口" "$(tg_format_ms "${KV[chat]}")"
     [ -n "${KV[ai]:-}" ] && tg_add_kv msg "AI 数据" "${KV[ai]}"
-    [ -n "${KV[run]:-}" ] && tg_add_link msg "新 run" "${KV[run]}" "${KV[run]}"
+    if [ -n "${KV[run]:-}" ]; then
+      _run_text="run ${KV[run]##*/}"
+      case "${KV[run]}" in *"://"*) ;; *) _run_text="run ${KV[run]}" ;; esac
+      tg_add_link msg "继任" "${KV[run]}" "$_run_text"
+    fi
     ;;
   *) exit 0 ;;
 esac

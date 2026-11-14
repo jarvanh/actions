@@ -288,13 +288,12 @@ variables → Actions → Variables 可随时改，留空走默认）：
 
 ## Telegram 通知与兜底
 
-主报告**普通**档；❌ / ⛔ 兜底 **alert** 档（见台账）。
+主报告**普通**档；❌ / ⛔ 兜底 **alert** 档（见台账）。标题 emoji 随结论降级：
+✅ 正常完成；⚠️ 0 可用节点、全部节点命中 bypass、或到点收摊；⛔ 信号终止；❌ 异常退出
+（标题带阶段）。版式见 [`telegram-notify.md`](telegram-notify.md)，发送点用
+`list_notify.sh proxy-speedtest` 现场枚举。
 
-- `✅ Gitee 测速完成`：正常完成。
-- `⚠️ Gitee 测速完成`：0 可用节点、全部可用节点命中 bypass，或到点收摊。
-- `⛔ Gitee 测速异常终止`：收到 SIGTERM / SIGINT，`handle_termination_signal` 兜底。
-- `❌ Gitee 测速异常退出 · <阶段>`：任一 `run_stage` 阶段抛异常（阶段即原因：
-  订阅源拉取 / 解析、mihomo 启动 / 配置、Gitee 仓库准备、测速文件准备、Gist 更新 / 通知…）。
+示例：`❌ Gitee 测速异常退出 · 测速文件准备`
 
 辅助机制：`/tmp/proxy_speedtest.lock` 每轮循环 touch（供外部心跳判 stale）；
 `maybe_detach_self` 支持 detach 后台自跑（CI 里固定关闭）。

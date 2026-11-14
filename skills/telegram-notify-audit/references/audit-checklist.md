@@ -17,13 +17,17 @@
 | 8 | 运行日志接线 | `grep -l TG_RUN_URL .github/workflows/*.yml` | **现场重数，不记固定数字**。判据是「每个发通知的 step 都有 `TG_RUN_URL`」；直接构造通知的 workflow 数与注入面不必相等。caption 场景也需注入 |
 | 9 | 树形 / 折叠调用点 | `tree_lines\|tree_fold\|tree_code_fold` | 逐个确认折叠口径（第 2 节） |
 | 10 | 分节计数 | `tg_add_section +[a-z_]+ +"[^"]*"` | 后跟列表的带 ` · N`；后跟 `<pre>` 或 kv 行的可不带 |
-| 11 | 速查表函数存在性 | 对 `api-reference.md` 三列表的每个函数名 `grep -nE '^(函数名)\(\)\|^def 函数名\|^function 函数名'` 对真源 | 双向核对：表里的名字必须存在；真源新增公开助手（如 `tg_add_link`）必须补进表。只记函数名不记行号 |
+| 11 | 速查表函数存在性 | 对 `docs/telegram-notify.md` 5.3 表的每个函数名 `grep -nE '^(函数名)\(\)\|^def 函数名\|^function 函数名'` 对真源 | 双向核对：表里的名字必须存在；真源新增公开助手（如 `tg_add_link`）必须补进表。只记函数名不记行号 |
 | 12 | **函数体内 `source` 真源** | `source .*tg_notify\.sh`，人工判断是否落在 `name() { … }` 之间 | 只允许在 step / heredoc 顶层。子 shell 内 source 只改子 shell 函数表，会还原调用点对 `send_tg` 的覆写、`local` 也失效（规范 · 通知函数的正确接法） |
 | 13 | 接力轮重复通知 | 长跑 workflow 里按「服务已就绪」发通知的调用点 | 默认 `/tmp` 标记文件区分首轮 / 接力轮；**例外**：被明确要求每轮发的（当前 workbuddy-gateway）按域文档执行 |
 | 14 | `🕒` 误用 | `🕒` | 只允许无 run 上下文的常驻服务收尾区（`health/system_health.sh`、`board.py`、`gateway-watchdog.py`）；正文分节 / 时间行不得使用 |
 | 15 | 展示时间时区 | 通知字符串里的 `UTC`；无 `TZ=` 的 `date +%F` | 展示时间一律东八区（`YYYY-MM-DD HH:MM（东八区）`）；仅机器值可 UTC。取展示值必须 `TZ=Asia/Shanghai` |
-| 16 | 通知清单枚举 / 一键校验 | `bash scripts/list_notify.sh`（清单）/ `--check`（1–15 项，FAIL 退出 1） | 发送点 / 标题 / 档位三段可正常输出；档位为「动态」的必须逐个回文件确认取值。**清单不落文档** |
-| 17 | 业务步内嵌通知 | 找「通知写在业务 step 末尾、该 step 无 `always()`」的调用点 | 按规范 · 接线的判据分类：依赖落盘产物的拆独立 step；依赖运行时变量的加失败兜底；「已就绪」与长驻循环**不拆**。别把「不拆」报成缺陷 |
+| 16 | 分节计数形式 | `tg_add_section` 标题：分节后跟 `tree_` / `tg_add_entry` 时，` · ` 后必须是计数或变量 | 不出现「· 模型数量 N」这类文字 | 机械项 16 |
+| 17 | 通知正文时间 | `tg_add_` / `tg_append` / `caption` 行里的 `YYYY-MM-DDTHH:MM` 或 `UTC` | 零使用；解析失败写「未知」，原始值只留日志 | 机械项 17 |
+| 18 | caption 大小口径 | `PART_CAPTION=` / `CAPTION=` 行里的 `MiB`/`MB` 字面量 | 大小必须走 `format_bytes` | 机械项 18 |
+| 19 | 文档示例大小 | `docs/telegram-notify.md` 与 send skill 参考里的 `1.7 GB` 式写法 | 只用 IEC 三位小数（`1.700 GiB`） | 机械项 19 |
+| 20 | 通知清单枚举 / 一键校验 | `bash scripts/list_notify.sh`（清单）/ `--check`（机械项 1–19，FAIL 退出 1） | 发送点 / 标题 / 档位三段可正常输出；档位为「动态」的必须逐个回文件确认取值。**清单不落文档** |
+| 21 | 业务步内嵌通知 | 找「通知写在业务 step 末尾、该 step 无 `always()`」的调用点 | 按规范 · 接线的判据分类：依赖落盘产物的拆独立 step；依赖运行时变量的加失败兜底；「已就绪」与长驻循环**不拆**。别把「不拆」报成缺陷 |
 
 ## 2. 四域判据（派 worker 时写进 prompt 的摘要）
 
@@ -74,12 +78,10 @@
 | 规范样例区的树形前缀是裸 `├─ `，实现渲染 `<code>  ├─ </code>` | 样例是抽象版式；前缀包等宽是规则，核对以真源渲染为准，别照样例写断言 |
 | 长跑接力轮每轮都发 workbuddy 就绪通知 | 2026-10-24 的明确决定（见 `run-workbuddy.sh` 注释与 `openclaw.md` 九），不是去重失效 |
 
-### 3.1 已知历史形态（冒烟 / 核对必须能抓，不是规范）
+### 3.1 冒烟必须能抓的契约（不是规范）
 
-- 资产段「📅 资产」节标题曾因追加语义被放在数据行之后（标题挂空）；看板侧再动
-  `_assets_block` 时先确认「标题在前」契约。
-- `_DAYS_CACHE` 漏定义曾导致快照后台重算每轮 `NameError`、SWR 恒回旧值；`board.log`
-  扫描项即为此设。
+- 资产段「📅 资产」节标题必须排在数据行之前（标题挂空即偏差）。
+- `_DAYS_CACHE` 必须已定义；`board.log` 出现 `NameError` 即偏差。
 - 空输出（任一源当日无数据、qingyan 回退快照）= 合法，非偏差。
 
 ## 4. 回归基线（改动触及 openlist 域时必跑）
@@ -106,3 +108,5 @@ grep -l "command not found" /tmp/x_*.log   # 必须为空（硬要求）
 - `test_batch_precheck_circuit_breaker.sh`：回归期间被并发跑过会出现假 `command not found`
 - `test_pair_parallel.sh`：`wc` 前导空白使 `[: 0\n0: integer expression expected`，
   场景 3a 误报，单独复跑 `PASS=11 FAIL=0`
+- `test_pair_share_slice.sh`：C4 份额秒数取整偶发差 1（期望 ≈16299、实得 16300），
+  单独复跑 `PASS=56 FAIL=0`

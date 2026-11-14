@@ -126,10 +126,6 @@ jobs:
             sleep 2
           done
       - name: run icloud-photos-downloader
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TG_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           sudo apt-get update
           pip install icloudpd
@@ -151,7 +147,7 @@ jobs:
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
           case "${{ job.status }}" in
             # 状态语义由标题 emoji 承担即可，kv 值里再带一个就成了重复（规范 · 结果通知）
-            success)   _emoji="☁️"; _status="完成" ;;
+            success)   _emoji="✅"; _status="完成" ;;
             cancelled) _emoji="⛔"; _status="已取消" ;;
             *)         _emoji="❌"; _status="失败" ;;
           esac

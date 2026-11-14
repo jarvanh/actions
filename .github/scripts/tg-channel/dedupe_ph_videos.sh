@@ -50,7 +50,9 @@ _bj_time() {
   local raw="$1" out=""
   [ -n "$raw" ] || return 0
   out=$(TZ=Asia/Shanghai date -d "$raw" '+%Y-%m-%d %H:%M' 2>/dev/null) || out=""
-  printf '%s' "${out:-$raw}"
+  # 解析失败写「未知」；原始值只留日志，不把 ISO/UTC 带进通知（规范 · 日期与相对时间）
+  [ -n "$out" ] || echo "⚠️ 时间解析失败: $raw" >&2
+  printf '%s' "${out:-未知}"
 }
 _grp_block() {
   if [ "$GRP_BLOCK_SHOWN" -ge 8 ]; then
@@ -136,14 +138,14 @@ for id in "${!ID_ENTRIES[@]}"; do
       [ -z "$p" ] && continue
       if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
         REMOVED_COUNT=$((REMOVED_COUNT + 1))
-        _grp_add group_entries "🗑 删除 $(tg_entry "${p}" "$(format_bytes "$s")" "$(_bj_time "$t")")"$'\n'
+        _grp_add group_entries "$(tg_entry "${p}" "已删除" "$(format_bytes "$s")" "$(_bj_time "$t")")"$'\n'
       else
-        _grp_add group_entries "❌ 删除失败 $(tg_entry "${p}")"$'\n'
+        _grp_add group_entries "$(tg_entry "${p}" "删除失败")"$'\n'
         echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
       fi
     done <<< "$sorted"
     _fold=$(_grp_fold)
-    _grp_block "🔖 ID $(escape_html "${id}") · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 仅按 ID 去重 · 保留 $(tg_entry "${kept_path}")"$'\n'"$(tree_lines "${group_entries}${_fold}")"
+    _grp_block "🔖 ID：<code>$(escape_html "${id}")</code> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 仅按 ID 去重 · 保留 $(tg_entry "${kept_path}")"$'\n'"$(tree_lines "${group_entries}${_fold}")"
     continue
   fi
 
@@ -166,17 +168,17 @@ for id in "${!ID_ENTRIES[@]}"; do
       if [ "$AUTO_DELETE" = "true" ]; then
         if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
           REMOVED_COUNT=$((REMOVED_COUNT + 1))
-          _grp_add group_entries "🗑 删除 $(tg_entry "${p}" "$(format_bytes "$s")" "$(_bj_time "$t")")"$'\n'
+          _grp_add group_entries "$(tg_entry "${p}" "已删除" "$(format_bytes "$s")" "$(_bj_time "$t")")"$'\n'
         else
-          _grp_add group_entries "❌ 删除失败 $(tg_entry "${p}")"$'\n'
+          _grp_add group_entries "$(tg_entry "${p}" "删除失败")"$'\n'
           echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
         fi
       else
-        _grp_add group_entries "⚠️ 待删除 · 已跳过 $(tg_entry "${p}" "$(format_bytes "$s")" "$(_bj_time "$t")")"$'\n'
+        _grp_add group_entries "$(tg_entry "${p}" "待删除 · 已跳过" "$(format_bytes "$s")" "$(_bj_time "$t")")"$'\n'
       fi
     done <<< "$sorted"
     _fold=$(_grp_fold)
-    _grp_block "🔖 ID $(escape_html "${id}") · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 标题相同 · 保留 $(tg_entry "${kept_path}")"$'\n'"$(tree_lines "${group_entries}${_fold}")"
+    _grp_block "🔖 ID：<code>$(escape_html "${id}")</code> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 标题相同 · 保留 $(tg_entry "${kept_path}")"$'\n'"$(tree_lines "${group_entries}${_fold}")"
   else
     # 规则2：title 不同 → 对比哈希
     # 打印各文件规范化 title，便于排查为何被判不同（如不可见字符）
@@ -212,27 +214,27 @@ for id in "${!ID_ENTRIES[@]}"; do
           if [ "$AUTO_DELETE" = "true" ]; then
             if rclone deletefile "$SOURCE_REMOTE/$p" 2>/tmp/rclone_err.log; then
               REMOVED_COUNT=$((REMOVED_COUNT + 1))
-              _grp_add group_entries "🗑 删除 $(tg_entry "${p}" "哈希一致 ${hash:0:12}" "旧文件")"$'\n'
+              _grp_add group_entries "$(tg_entry "${p}" "已删除" "哈希一致 ${hash:0:12}" "旧文件")"$'\n'
             else
-              _grp_add group_entries "❌ 删除失败 $(tg_entry "${p}")"$'\n'
+              _grp_add group_entries "$(tg_entry "${p}" "删除失败")"$'\n'
               echo "  ❌ 删除失败: $(tail -n 3 /tmp/rclone_err.log)"
             fi
           else
-            _grp_add group_entries "⚠️ 待删除 · 已跳过 $(tg_entry "${p}" "哈希一致 ${hash:0:12}" "旧文件")"$'\n'
+            _grp_add group_entries "$(tg_entry "${p}" "待删除 · 已跳过" "哈希一致 ${hash:0:12}" "旧文件")"$'\n'
           fi
         done <<< "$hsorted"
       done <<< "$DUP_HASHES"
       _fold=$(_grp_fold)
-      _grp_block "🔖 ID $(escape_html "${id}") · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 标题不同 · 删除哈希一致的旧文件"$'\n'"$(tree_lines "${group_entries}${_fold}")"
+      _grp_block "🔖 ID：<code>$(escape_html "${id}")</code> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 标题不同 · 删除哈希一致的旧文件"$'\n'"$(tree_lines "${group_entries}${_fold}")"
     else
       # 所有哈希各不相同 → 仅通知不删除
       NOTIFY_ONLY_COUNT=$((NOTIFY_ONLY_COUNT + 1))
       _grp_reset
       while IFS=';' read -r h t s p; do
-        _grp_add group_entries "⚠️ 保留 $(tg_entry "${p}" "哈希 ${h:0:12}")"$'\n'
+        _grp_add group_entries "$(tg_entry "${p}" "仅通知" "哈希 ${h:0:12}")"$'\n'
       done < "$HASH_LIST"
       _fold=$(_grp_fold)
-      _grp_block "🔖 ID $(escape_html "${id}") · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 标题不同且哈希各不相同 · 仅通知"$'\n'"$(tree_lines "${group_entries}${_fold}")"
+      _grp_block "🔖 ID：<code>$(escape_html "${id}")</code> · 第 ${IDX}/${DUP_TOTAL} 组 · ${count} 个 · 标题不同且哈希各不相同 · 仅通知"$'\n'"$(tree_lines "${group_entries}${_fold}")"
     fi
     rm -f "$HASH_LIST"
   fi

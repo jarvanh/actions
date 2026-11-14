@@ -24,6 +24,7 @@
           # 缺了它 serve 段恒走「TS_FQDN 为空」分支，面板/反代入口不建）
           [ -f "$HOME/ts.env" ] && . "$HOME/ts.env" || true
           source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+          source "${GITHUB_WORKSPACE}/.github/scripts/openclaw/notify_common.sh"
 
           # 2026-11-02 主人拍板：代码+数据常驻 Dropbox（照 qingyan 范式），
           # /tmp 只做临时克隆。机器重启不再丢 accounts.json/代码。
@@ -274,8 +275,7 @@
             tg_add_kv _m "结论" "未就绪"
             tg_add_kv _m "原因" "$AC_REASON"
             tg_add_kv _m "处理" "本机 clone jarvanh/autoclaw-proxy 后跑 python3 app/autoclaw_auth.py bootstrap（桌面端加 --inspect=9229）"
-            tg_add_footer _m
-            send_tg "$_m" alert || echo "::warning::TG 通知发送失败（不影响任务）"
+            gw_send _m alert || echo "::warning::TG 通知发送失败（不影响任务）"
           else
             # 2026-10-11 标题对齐全库网关就绪约定：🟢（对齐 workbuddy/zcode2api/trae/Runner，见 docs/telegram-notify.md）；原 ✅ 是照抄 qingyan 骨架带进来的游离用法
             tg_add_title _m "🟢 autoclaw-proxy 已就绪"
@@ -288,8 +288,8 @@
             # 数据目录是「这条通知说的是哪台机/哪份数据」的定位信息（主人 10-06 定的
             # 头部定位口径）；代码真源已迁 GitHub（2026-10-12，Dropbox 只存数据）。
             if [ -n "$AC_ACCOUNTS" ] && [ "$AC_ACCOUNTS" != "?" ]; then
-              tg_add_section _m "💳 账号池 · ${AC_ACCOUNTS}"
-              _ac_rows="$(tree_conn 1)$(tg_entry "账号数 ${AC_ACCOUNTS}" "负载均衡 · 401/406 冷却回退 · 快过期积分优先")"$'\n'
+              gw_add_pool_section _m "${AC_ACCOUNTS}"
+              _ac_rows="$(tree_conn 1)$(tg_entry_text "账号数 ${AC_ACCOUNTS}" "负载均衡 · 401/406 冷却回退 · 快过期积分优先")"$'\n'
               # 积分包信息（主人 2026-10-12 要求：对齐 workbuddy 的「积分有效期」口径）
               [ -n "${AC_SCORE:-}" ] && _ac_rows+="$(tree_sub 1)$(escape_html "$AC_SCORE")"$'\n'
               [ -n "${AC_TOKEN_EXP:-}" ] && _ac_rows+="$(tree_sub 1)$(escape_html "$AC_TOKEN_EXP")"$'\n'
@@ -320,8 +320,7 @@
             # 无数据时输出空串静默跳过（与 wb/zcode 同口径）。
             _ac_ul_block="$(python3 /dropbox/self-hosted/quota-board/board.py usage-ledger autoclaw 12 2>/dev/null || true)"
             [ -n "$_ac_ul_block" ] && tg_append _m "$_ac_ul_block"
-            tg_add_footer _m
-            send_tg "$_m" alert || echo "::warning::TG 通知发送失败（不影响任务）"
+            gw_send _m alert || echo "::warning::TG 通知发送失败（不影响任务）"
           fi
           exit 0
   )

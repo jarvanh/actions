@@ -17,6 +17,7 @@
     set -euo pipefail
     # 通知真源在 step 顶层 source 一次（勿挪进函数体，理由见 workbuddy 步骤同名注释 / 规范 · 通知函数的正确接法）
     source "${GITHUB_WORKSPACE}/.github/scripts/telegram/tg_notify.sh"
+    source "${GITHUB_WORKSPACE}/.github/scripts/openclaw/notify_common.sh"
 
     TRAE_DATA=/dropbox/self-hosted/trae2api
     TRAE_SRC=/tmp/local_trae2api-src
@@ -76,7 +77,7 @@
           # 按 uid 取末行（保持首次出现顺序）：JSONL 逐行 uid 序列去重拼接
           _uids="$(jq -r '.uid' "$CHECKIN_JSONL" 2>/dev/null | awk '!seen[$0]++' || true)"
           _total="$(printf '%s\n' "$_uids" | grep -c . || true)"
-          tg_add_section _msg "💳 账号池 · ${_total}"
+          gw_add_pool_section _msg "${_total}"
           _rows=""
           _i=0
           while IFS= read -r _uid; do
@@ -170,7 +171,7 @@
         # 取数失败时为空，
         # 整段跳过（与凭据段同口径）。section 计数与「🔑 凭据 · N」同构。
         if [ -n "${RATES_TXT:-}" ]; then
-          tg_add_section _msg "📊 模型倍率 · 模型数量 ${RATES_N:-0}"
+          gw_add_rates_section _msg "${RATES_N:-0}"
           tg_add_pre _msg "$RATES_TXT"
           # tg_add_pre 内部 <pre> 包裹 + 转义；段尾补空行对齐账号池段
           tg_append _msg $'\n'
@@ -179,16 +180,10 @@
         # 调 board.py CLI 与看板共用渲染代码与数据源。trae 当日无 usage 文件时
         # CLI 输出空串，静默跳过（不留空行）。
         # 资产段（签到汇总 + 即将过期）：路线 B —— 口径真源在看板（2026-11-01）。
-        _trae_assets="$(python3 /dropbox/self-hosted/quota-board/board.py assets trae 2>/dev/null || true)"
-        [ -n "$_trae_assets" ] && tg_append _msg "$_trae_assets"
-        _trae_ul_block="$(python3 /dropbox/self-hosted/quota-board/board.py usage-ledger trae 12 2>/dev/null || true)"
-        [ -n "$_trae_ul_block" ] && tg_append _msg "$_trae_ul_block"
-        if [ -n "$6" ]; then
-          tg_add_section _msg "🧾 原始输出"
-          tg_add_pre _msg "$(tg_tail_safe "$6" 1200)"
-        fi
-        tg_add_footer _msg
-        if send_tg "$_msg" alert; then
+        gw_add_board_assets _msg trae
+        gw_add_board_usage _msg trae 12
+        gw_add_original_output _msg "$6"
+        if gw_send _msg alert; then
           TRAE_NOTIFY_OK=1
         else
           echo "::warning::TG 通知发送失败（不影响任务）"

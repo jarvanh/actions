@@ -54,8 +54,8 @@ if ! ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of cs
 fi
 
 # 文件完好，预处理（转码/faststart）并上传到 Telegram
-# 直接输出原始 URL，Telegram 自动识别为可点击链接（无需 parse_mode）
-echo "${FILENAME} (${FILESIZE_HUMAN}) ${URL}" >> new_downloads_list.txt
+# 供汇总通知逐条渲染：文件名<TAB>大小<TAB>原始 URL（制表符分隔，含空格的文件名不会被切开）
+printf '%s\t%s\t%s\n' "${FILENAME}" "${FILESIZE_HUMAN}" "${URL}" >> new_downloads_list.txt
 # 上传成功后，通过独立 Python 脚本原子追加到 uploaded_videos.json（保持 JSON v1 结构，避免 shell >> 破坏格式）
 FILESIZE_BYTES=$(stat -c%s "$FILEPATH" 2>/dev/null || stat -f%z "$FILEPATH" 2>/dev/null || echo "")
 # 本地文件 mtime 作为 source_modified_at（yt-dlp 下载时间，最接近原始视频修改时间）
@@ -81,7 +81,7 @@ CAPTION_MODTIME=""
 if [ -n "$SOFTWARE_MODIFIED_AT" ] && [ "$SOFTWARE_MODIFIED_AT" != "0" ]; then
   CAPTION_MODTIME=$(TZ=Asia/Shanghai date -d "@${SOFTWARE_MODIFIED_AT}" '+%Y-%m-%d %H:%M' 2>/dev/null || true)
 fi
-[ -n "$CAPTION_MODTIME" ] || CAPTION_MODTIME="${SOURCE_MODIFIED_ISO:-未知}"
+[ -n "$CAPTION_MODTIME" ] || CAPTION_MODTIME="未知"
 if bash ${GITHUB_WORKSPACE}/.github/scripts/tg-channel/transcode_and_send.sh "${FILEPATH}" "${TELEGRAM_CHANNEL_ID}" "${CAPTION_MODTIME}"; then
   python3 "${GITHUB_WORKSPACE}/.github/scripts/tg-channel/add_uploaded_video.py" \
     "${TARGET_DIR}/uploaded_videos.json" \
