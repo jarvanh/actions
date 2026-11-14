@@ -296,6 +296,14 @@ if [ "$PRINT" = 1 ]; then
   printf '%s\n' "$msg"
   exit 0
 fi
+# 2026-11-14：发送前**复检**切换标记。开头的检查只能挡住「标记已存在时才开跑」的
+# 轮次；已在跑的这一轮会探完才发现隧道/服务刚被 cutover 停掉，然后照常发送
+#（实测 11-14 05:30 一条 ai-api 530 误报）。所以真正发送前再看一眼，处于交接
+# 窗口就整轮静默（不改状态文件，新 VM 会接管后续告警）。
+if [ -f /tmp/openclaw-handoff/switching ] && [ "$FORCE" = 0 ]; then
+  echo "[health] $(TZ=Asia/Shanghai date '+%F %T') handoff=切换中（发送前复检），抑制本轮发送"
+  exit 0
+fi
 # 发送成功才落状态：失败时保留旧状态，下一轮同一判据会重试；告警成功才允许后续
 # 发「恢复」，不会出现「没告警却报恢复」。
 if send_tg "$msg" "${tier:-}"; then

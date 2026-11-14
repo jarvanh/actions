@@ -38,14 +38,13 @@
   `old.json=archives_done`（旧轮最终归档上传完，`gate.sh` 阻塞）才起服务 ——
   模型通道 T0+6~10min 恢复（与旧版整条黑 ~8min 持平），网关/UI/Tailscale 先亮。
 - **归档循环**：继任者同样等 archives_done 才启动（防两台 VM 并发写同一个云包）。
-- **交接轮的最终归档 = 灾备备份**：交出后旧轮继续把冻结态打包上传（实测 ~9min），
-  这条通知在交接轮标题为「✅ OpenClaw **交接后备份**完成」并附一句
-  「服务已在继任者上运行……不阻塞任何用户」；传统轮才是「最终归档完成（= 本轮结束）」。
-- **交接进度通知**（2026-11-11）：`.github/scripts/handoff/handoff-notify.sh` 在五个节点
-  发普通档通知 —— 准备中（自动=T-12min / 手动=立即，且明确催促停写）/ 继任者已就绪 /
-  已交出（开始下线）/ **OpenClaw 聊天入口已恢复**（只看 18789 `/health=200`，不代表模型通道）/
-  交接完成（整体下线 + AI 网关恢复 + 新 run 链接）。run id 均可点击。
-  无凭据或发送失败一律静默，不影响交接。
+- **交接轮的最终归档 = 灾备备份**：交出后旧轮继续把冻结态打包上传（实测 ~9min）。
+  通知标题必须与「本轮结束」区分：交接轮写明「交接后备份」，并附一句
+  「服务已在继任者上运行……不阻塞任何用户」；传统轮才是最终归档。
+- **交接进度通知**：`.github/scripts/handoff/handoff-notify.sh` 在五个阶段各发一条
+  普通档通知；标题只写阶段，kv 说明服务是否可用与预计 / 已用时间。
+  逐条标题用 `list_notify.sh handoff` 现场枚举。聊天入口恢复只代表 18789 `/health=200`，
+  不代表模型通道；run id 均可点击。无凭据或发送失败一律静默，不影响交接。
 - **可观测性**：Phase 0 埋点在每轮收尾日志输出 `[phase0]` 段（增量字节/文件数/直连评估），
   用于校准 rsync 增量交接的实际收益。
 
@@ -98,8 +97,7 @@ ssh runner@openclaw 'touch /tmp/openclaw-handoff-request'
 | AI 网关恢复（cutoff → OmniRoute 就绪） | 182s（`OPENCLAW_AI_EARLY=1` 时常早于聊天） |
 | **整体可用**（cutoff → 8/8） | **252-296s** |
 
-通知依次为：准备中（手动版含「⚠️ 请现在就停止写入」）→ 继任者已就绪 → 已交出 →
-聊天入口已恢复 → 交接完成（整体下线 / AI 网关恢复）。run id 均为可点链接。
+每个交接阶段各发一条通知（普通档）；run id 均为可点链接，手动交接会明确催促停写。
 
 取消与回退：
 
@@ -178,6 +176,12 @@ cutover 在停服务**之前**落 `/tmp/openclaw-handoff/switching`：
 `system_health.sh` 见到标记直接静默退出，`gateway-watchdog.py` 见到则返回空不探测。
 原因：只停 timer 拦不住**已在跑的 oneshot** —— 2026-11-11 21:22 交接瞬间曾误报
 「18789 未监听 + 7/8」。abort 回退时删除该标记（服务会被拉起）。
+
+2026-11-14 补第二道闸：**发送前复检**。开头的检查只能挡住「标记已存在时才开跑」的
+轮次；已开跑的那一轮常常在 cutover 停服之后才探完，于是照常发出（实测 05:30
+`ai-api 公网链路 530` 误报）。现在两套看门狗在真正 `send` 前再读一次标记，
+命中就整轮静默、不写状态（新 VM 会接管后续告警）。`--force`（health）与
+`--dry-run`（gateway）是人工验证口，不受抑制。
 
 
 ### 步骤顺序
@@ -660,7 +664,7 @@ Runner 每轮通过 Tailscale 加入 tailnet（ephemeral，`--hostname=openclaw`
 |---|---|---|
 | SSH | `ssh runner@openclaw`（或 `@<TS_IP>`） | Tailscale SSH，`ts.env` 轮询等待名字收敛后才写入，避免主机名漂移 |
 | 文件管理 | `sftp://runner@openclaw/` | Tailscale SSH 自带 SFTP，Finder ⌘K 原生挂载，零额外服务 |
-| 远程桌面 | `openclaw.…ts.net:21118` | 本 workflow **不再部署 RustDesk**：该地址由 `TS_FQDN` 拼端口后随「🟢 OpenClaw Runner 已就绪」推送，供 tailnet 内已装 RustDesk 的客户端点对点直连（不经中继）；无官方 ID/中继入口 |
+| 远程桌面 | `openclaw.…ts.net:21118` | 本 workflow **不再部署 RustDesk**：该地址由 `TS_FQDN` 拼端口后随 runner 就绪通知推送，供 tailnet 内已装 RustDesk 的客户端点对点直连（不经中继）；无官方 ID/中继入口 |
 
 - 节点属性：ephemeral、`tag:ci`，job 结束自动移除。`TS_OAUTH_CLIENT_ID` / `TS_OAUTH_CLIENT_SECRET`
   任一缺失时 Tailscale 段整体跳过，只打一行告警（此时没有 SSH 入口）。
@@ -858,7 +862,7 @@ serve 根本看不到，最快也要等下一轮（≈5.7 小时）。为此在�
 - **签到**：积分真源是 `POST {Origin}/v2/billing/meter/checkin-activity-status`
   （只读幂等），查询失败不编造。国际站无签到活动：启动步发最小活跃请求，429 落 defer
   文件并显示「活跃待重试 · 限流 HH:MM 后自动重试」。
-- **就绪通知每轮都发**（2026-10-24 决定，接力轮也发；`/tmp` 标记文件仍写但不再用于静默）。
+- **就绪通知每轮都发**（接力轮也发；`/tmp` 标记文件仍写但不用于静默）。
 
 ### 9.2 trae2api（`run-trae2api.sh`）
 
@@ -867,7 +871,7 @@ serve 根本看不到，最快也要等下一轮（≈5.7 小时）。为此在�
 - `🩺 签到健康 · N`（N 是账号数）：条目主体是自然语言，走 `tg_add_entry_text`；全健康
   整段跳过。备注含上次成功日期、连续失败、设备换代、退避重试。
 - 「🧾 原始输出」非空才渲染（容器日志 / 签到 stderr 尾部，1200 字节）。
-- 「📊 模型倍率 · N」与 workbuddy 的独立第二条通知同名不同体。
+- 模型倍率分节按规范 · 分节计数；数据源与 workbuddy 的独立第二条通知不同。
 - 「用量 + 流水」走 `board.py usage-ledger <gateway> 12`，空输出静默跳过。
 
 ### 9.3 zcode2api（`run-zcode2api.sh`）
