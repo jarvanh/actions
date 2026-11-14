@@ -45,10 +45,19 @@ while [ "$(date +%s)" -lt "$_deadline" ]; do
   if timeout 300 rsync -a --partial --timeout=60 \
       "rsync://${OLD_TS_IP}:${HANDOFF_RSYNC_PORT}/ai/" "$AI_PAYLOAD_DIR/" >/dev/null 2>&1 \
      && [ -f "$AI_PAYLOAD_DIR/dump.rc" ]; then
-    if [ "$(cat "$AI_PAYLOAD_DIR/dump.rc" 2>/dev/null)" != "0" ] \
-       || [ ! -s "$AI_PAYLOAD_DIR/omnivol.tar" ] || [ ! -s "$AI_PAYLOAD_DIR/omnideploy.tar" ]; then
-      echo "⚠️ [ai-fetch] 旧轮 dump 失败（rc=$(cat "$AI_PAYLOAD_DIR/dump.rc" 2>/dev/null)），走 Dropbox 回退"
+    # 2026-11-14 实测：rsync 会先同步到 dump.rc / omnideploy.tar，而 2GB 的
+    # omnivol.tar 还在传（rsync --partial 的临时文件 mtime=1970）——
+    # 原代码此时直接 break，把「还没传完」误判成「dump 失败」，永久回退 Dropbox。
+    # 区分两种情形：rc!=0 才是真失败（旧轮明确报错）；rc==0 但文件缺失/为空
+    # 说明仍在传输 → 继续下一轮（--partial 续传）。
+    _rc="$(cat "$AI_PAYLOAD_DIR/dump.rc" 2>/dev/null)"
+    if [ "$_rc" != "0" ]; then
+      echo "⚠️ [ai-fetch] 旧轮 dump 失败（rc=${_rc:-空}），走 Dropbox 回退"
       break
+    fi
+    if [ ! -s "$AI_PAYLOAD_DIR/omnivol.tar" ] || [ ! -s "$AI_PAYLOAD_DIR/omnideploy.tar" ]; then
+      echo "⏳ [ai-fetch] dump.rc=0 但大文件未到齐（第 ${_i} 次，omnivol=$(stat -c %s "$AI_PAYLOAD_DIR/omnivol.tar" 2>/dev/null || echo 0)B）—— 继续续传"
+      sleep 3; continue
     fi
     # 校验 tar 完整性（截断包绝不装载）
     if ! tar tf "$AI_PAYLOAD_DIR/omnivol.tar" >/dev/null 2>&1 \
