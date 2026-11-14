@@ -38,7 +38,12 @@ HANDOFF_TRIGGER_BEFORE_MIN="${HANDOFF_TRIGGER_BEFORE_MIN:-12}"
 HANDOFF_READY_DEADLINE_MIN="${HANDOFF_READY_DEADLINE_MIN:-4}"
 # 继任者等 CUTOVER 上限；旧轮等 serving 上限（两者错开，旧轮先行超时回退）
 HANDOFF_CUTOVER_WAIT_SEC="${HANDOFF_CUTOVER_WAIT_SEC:-1500}"
-HANDOFF_SERVING_WAIT_SEC="${HANDOFF_SERVING_WAIT_SEC:-900}"
+# 2026-11-14 复核：收尾预算 26min = serving 等待 + 归档等固定步骤。
+# serving 正常 200-300s 到达；900s 的旧上限在最坏情况下把收尾挤超预算
+#（实测 11-14：双重等待 35min 撞 360min 硬上限被杀）。改为 600s：
+# 仍覆盖慢链路（正常上限 ~300s + 2 倍余量），超时立即 abort 回退，
+# 给归档/接力留足时间 —— 不再出现「等太久而撞墙被杀」。
+HANDOFF_SERVING_WAIT_SEC="${HANDOFF_SERVING_WAIT_SEC:-600}"
 # 继任者等旧轮 archives_done 上限（超时=旧轮半路死，降级用基座数据续命）
 HANDOFF_ARCHIVES_WAIT_SEC="${HANDOFF_ARCHIVES_WAIT_SEC:-1500}"
 

@@ -43,6 +43,13 @@ for _i in $(seq 1 $(( wait_sec / 5 ))); do
       ;;
     archives_done)
       case "$_st" in archives_done) : > "$PASS_FILE"; exit 0 ;; handoff_aborted) : > "$PASS_FILE"; exit 0 ;; esac
+      # 2026-11-14 复核补：旧 job 在收尾中被硬上限杀死时，mark-archives-done 没跑，
+      # archives_done 字段可能永远不是 true → 继任者空等 25min。
+      # 只认 handoff_done（**不能**认 handing_over）：handing_over 出现在继任者
+      # rsync **之前**，此时放行会让上游用 20min 前的基座起服务，破坏零丢失口径。
+      # handoff_done 意味着 cutover 已收到 serving（rsync_done 早已完成、数据在手上），
+      # 此时放行仅损失「旧轮最终归档」这一层备份，服务数据本身不丢。
+      case "$_st" in handoff_done) : > "$PASS_FILE"; exit 0 ;; esac
       # 2026-11-11：移交成功时 state 保持 handoff_done（终态），归档完成改用
       # 独立字段 archives_done=true 表达 —— 否则闸门永远等不到（实测卡 30min，
       # 归档循环/保活被挡，watchdog 报 archive-loop 未运行）。
