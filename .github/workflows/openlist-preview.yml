@@ -1,0 +1,164 @@
+# OpenList 剩余量预览测量（独立于主同步管线，后台并行）
+#
+# 为什么单独一个 workflow（2026-11-14，用户要求「预览不要阻碍同步」）:
+#   主 workflow 的 concurrency 是单例（1 running + 1 pending），预览若跑在
+#   主轮里就必须占掉那个唯一槽位 —— 一轮预览 = 少跑一轮同步（约 5h20m）。
+#   而「还差多少字节没同步」只能由预览差值算出（trend.jsonl 的
+#   remaining_bytes 在 skip_preview=true 下恒为 null，60 轮无一例外）。
+#   ⇒ 把预览拆成独立 workflow，用**独立 concurrency 组** openlist-preview，
+#     与 openlist-singleton 互不排队：同步照常跑，预览在旁边并行。
+#
+# 代价（必须说清，不是零成本）:
+#   - 会起第二个 OpenList 容器（自己的 data.db 副本，从 dropbox 拉，全程不回传）；
+#   - 目标端列举与主轮同步**共享后端带宽/限流额度** ⇒ 主轮那几对会略慢；
+#     故列举并发压到很低（OPENLIST_CHECKERS 默认 2，该变量在 3 处
+#     `--checkers` 被真实消费）。注意：本仓没有 tpslimit 参数通道，
+#     不要在这里写"已限速"——只能靠降低并发。
+#   - 因此"不阻碍同步"准确含义是：**不占同步槽位、不排队**，而非零影响。
+#
+# 只读保证（红线）:
+#   本 workflow 只做 `TASK_PREVIEW_ONLY=1 run_all_tasks` —— 该分支在 sync_task
+#   里直接 `_preview_register` 后 return，**不传输、不删除、不写 marker、
+#   不碰源端**。它唯一的产出是 stdout 里的逐对「未同步字节数」。
+name: openlist-preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      preview_task:
+        description: "只测某个任务（task 名或 dest 子串；留空 = 全部 16 对）"
+        required: false
+        type: string
+        default: ""
+      list_checkers:
+        description: "列举并发（默认 2；该值经 OPENLIST_CHECKERS 被 --checkers 真实消费，压低以免与主轮同步抢后端限流）"
+        required: false
+        type: string
+        default: "2"
+
+concurrency: openlist-preview   # 独立组: 绝不与 openlist-singleton 互等
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    # 16 对全量列举（含 task1 782GiB / task3 1.7TB）耗时不可控，给足上限；
+    # 到点由平台收掉，已打印的对数仍然有效（逐对打印，不是最后才汇总）。
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      OPENLIST_ADMIN_PASSWORD: ${{ secrets.OPENLIST_ADMIN_PASSWORD }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: rclone-install
+        run: |
+          set -e
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" install
+
+      - name: rclone-config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE }}
+        run: |
+          set -e
+          # 与主 workflow 同一套配置来源（幂等：配置一致时无变更）
+          bash "$GITHUB_WORKSPACE/.github/scripts/rclone/setup_rclone.sh" config
+
+      - name: 验证远端连通
+        run: |
+          rclone lsf dropbox: | head -5
+          rclone lsf onedrive: | head -5
+
+      - name: 拉起 OpenList 容器（预览副本）
+        run: |
+          set -e
+          docker rm -f openlist-preview 2>/dev/null || true
+          sudo mkdir -p /opt/openlist-data
+          sudo chmod 0777 /opt/openlist-data
+          # 与主 workflow 完全相同的拉库口径（含排除项）: 预览必须列举
+          # 生产实际加载的那份配置，否则测的是别的东西。
+          rclone copy dropbox:self-hosted/openlist/data /opt/openlist-data \
+            --exclude "data.db-wal" --exclude "data.db-shm" --exclude "data.db-journal" \
+            --exclude "log/**" --exclude "temp/**"
+          echo "拉取完成: $(ls -la /opt/openlist-data/ | tail -n +2 | wc -l) 个条目"
+          docker run -d --restart=no -v /opt/openlist-data:/opt/openlist/data \
+            -p 5244:5244 -e PUID=0 -e PGID=0 -e UMASK=022 \
+            --name=openlist-preview openlistteam/openlist:beta
+
+      - name: 校验 OpenList 容器运行状态
+        run: |
+          set -e
+          source "$GITHUB_WORKSPACE/.github/scripts/openlist/load_all.sh"
+          echo "等待 OpenList 就绪..."
+          if wait_openlist_ready; then
+            echo "✅ 预览副本容器已就绪"
+          else
+            echo "❌ 容器未能就绪"
+            exit 1
+          fi
+
+      - name: 预览测量（只读列举，输出逐对未同步字节）
+        env:
+          PREVIEW_TASK_FILTER: ${{ inputs.preview_task }}
+          OPENLIST_CHECKERS: ${{ inputs.list_checkers }}
+          OPENLIST_TRANSFERS: ${{ inputs.list_checkers }}
+          OPENLIST_SUBDIR_LIST_PARALLEL: ${{ inputs.list_checkers }}
+        run: |
+          set -uo pipefail
+          source "$GITHUB_WORKSPACE/.github/scripts/openlist/load_all.sh"
+
+          # 降低对后端的冲击（与主轮同步并行，不能把它拖垮）。
+          # 只调并发，不声称限速 —— 本仓无 tpslimit 参数通道。
+          export OPENLIST_CHECKERS="${OPENLIST_CHECKERS:-2}"
+          export RCLONE_CHECKERS="${OPENLIST_CHECKERS}"
+          export RCLONE_TRANSFERS="${OPENLIST_TRANSFERS}"
+
+          echo "=== 预览测量开始（只读：不传输 / 不删除 / 不写 marker）==="
+          echo "列举并发=${OPENLIST_CHECKERS}"
+
+          # 任务过滤: 只预览匹配的同步对（留空=全部）
+          if [ -n "${PREVIEW_TASK_FILTER:-}" ]; then
+            export FORCE_SYNC_TASK="${PREVIEW_TASK_FILTER}"
+            echo "任务过滤: ${PREVIEW_TASK_FILTER}"
+          fi
+
+          TASK_PREVIEW_ONLY=1 run_all_tasks
+
+          # ===== 逐对输出未同步量 =====
+          # PREVIEW_PENDING_MAP 的键是 "<task>|<dest>"，值是 "<bytes> <count>"
+          # （见 task_preview.sh）。逐对打印而不是最后汇总: 万一 180min 到点被
+          # 收掉，已算出的对仍然有用。
+          echo ""
+          echo "===== 逐对未同步量 ====="
+          _total=0
+          _pairs=0
+          _unknown=0
+          for _k in "${!PREVIEW_PENDING_MAP[@]}"; do
+            _v="${PREVIEW_PENDING_MAP[$_k]}"
+            _b="${_v%% *}"
+            _c="${_v##* }"
+            if ! [[ "$_b" =~ ^[0-9]+$ ]]; then
+              echo "  ${_k} → 未知（列举失败或未产出）"
+              _unknown=$((_unknown + 1))
+              continue
+            fi
+            _total=$((_total + _b))
+            _pairs=$((_pairs + 1))
+            printf '  %-72s %14s  %8s 文件\n' "$_k" "$(format_bytes "$_b")" "$_c"
+          done
+          echo "-----"
+          echo "有数据的对数: ${_pairs} · 未知: ${_unknown}"
+          echo "合计未同步: $(format_bytes "$_total")（${_total} 字节）"
+          echo ""
+          echo "对照口径: 该数字 = 源端有、目标端无（或大小不一致）的文件字节合计；"
+          echo "  与上一轮同名 workflow 的合计对比，即可判断是否单调收敛。"
+
+      - name: 收尾清理
+        if: ${{ always() }}
+        run: |
+          docker rm -f openlist-preview 2>/dev/null || true
+          echo "预览副本容器已清理（不触碰主实例 openlist）"
