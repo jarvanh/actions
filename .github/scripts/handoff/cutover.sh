@@ -219,37 +219,14 @@ if [ "${OPENCLAW_AI_EARLY:-}" = "1" ] && [ -f "$GITHUB_WORKSPACE/.github/scripts
 fi
 
 
-# ── 3.6 增量同步完成后立刻把 openclaw 让给继任者 ──
-# 2026-11-11 实测事故链：旧 VM 一直占着 Tailscale 名 `openclaw` 直到 job 结束
-# （22:43:22），继任者只能叫 openclaw-1，回收守护 120s 一轮 → 22:47:02 才收回。
-# 期间客户端的 `openclaw` 域名指向这台**已停服**的机器（22:35–22:47，约 12 分钟）：
-# 连接失败、用户输入无处落地。会话库本身没丢（序列连续），但体验上就是断线。
-# 修法：等继任者报 rsync_done（数据已到手）后，旧 VM 改名让位 ——
-# 用改名而不是 logout，旧 VM 仍在 tailnet，万一后续回退还能被访问。
-# ⚠️ 触发条件必须是 **serving**（不能用 rsync_done）：AI 快照走的就是本机
-# rsyncd 的 ai 模块，rsync_done 时快照往往刚开始 dump（2GB）——
-# 2026-11-11 23:11 实测：rsync_done 即 stop_rsyncd，继任者拉不到 AI 包，
-# 卡在 ai_archives_done 闸门 25 分钟。改名让位放到 serving 之后即可，
-# rsyncd 由 cutover 在收到 serving 后统一 stop。
-if [ -n "${SID:-}" ]; then
-  _rns=""; _renamed=0
-  for _i in $(seq 1 240); do   # ≤20min（覆盖 serving 等待窗口）
-    _rns="$(handoff_new_state "$SID")"
-    case "$_rns" in serving) _renamed=1; break ;; esac
-    case "$_rns" in aborted) break ;; esac
-    sleep 5
-  done
-  if [ "$_renamed" = 1 ]; then
-    _retired="openclaw-retired-${GITHUB_RUN_ID:-x}"
-    if sudo -n tailscale set --hostname="$_retired" >/dev/null 2>&1; then
-      echo "✅ [cutover] 增量已同步 → 本机改名 ${_retired}，openclaw 让给继任者"
-    else
-      echo "⚠️ [cutover] 改名让位失败（继任者仍可能顶着 openclaw-1）"
-    fi
-  else
-    echo "ℹ️ [cutover] 未见 serving（state=${_rns:-?}），不改名（保留回退可达性）"
-  fi
-fi
+# ── 3.6 主机名让位（改名动作放在下面「等 serving」的命中分支里执行）──
+# 背景：旧 VM 占着 Tailscale 名 `openclaw` 会让继任者顶着 openclaw-1，
+# 客户端域名一直指向已停服的本机（2026-11-11 实测 12 分钟连不上）。
+# ⚠️ 2026-11-14 事故：这里曾**独立**再等一轮 serving（≤20min），
+# 与下面主循环的 15min 叠加成 35min，超出 job 剩余预算 →
+# 旧 job 在硬上限被强杀，既没写 handoff_aborted 也没写 archives_done，
+# 继任者又白等闸门 25min，最终 52 分钟才 serving。
+# 现在只保留**一个**等待窗口（下面主循环），命中 serving 时顺手改名 + 写 handoff_done。
 
 echo "🤝 [cutover] 已交出（handing_over），等继任者 serving（≤${HANDOFF_SERVING_WAIT_SEC}s）…"
 bash "$GITHUB_WORKSPACE/.github/scripts/handoff/handoff-notify.sh" cutover \
@@ -261,6 +238,13 @@ for _i in $(seq 1 $(( HANDOFF_SERVING_WAIT_SEC / 5 ))); do
     serving)
       handoff_put "$HANDOFF_OLD_REMOTE" "$(handoff_old_json handoff_done "$SID" "$TS_IP" "$CUTOVER_TS" "$BASE_MARKER")"
       stop_rsyncd
+      # 让出 openclaw 主机名（改名而非 logout：本机仍在 tailnet，回退可达）
+      _retired="openclaw-retired-${GITHUB_RUN_ID:-x}"
+      if sudo -n tailscale set --hostname="$_retired" >/dev/null 2>&1; then
+        echo "✅ [cutover] 本机改名 ${_retired}，openclaw 让给继任者"
+      else
+        echo "⚠️ [cutover] 改名让位失败（继任者可能仍顶着 openclaw-1）"
+      fi
       echo "🎉 [cutover] 继任者已 serving → handoff_done（本轮回退为纯备份收尾，不再 Trigger next）"
       exit 0
       ;;

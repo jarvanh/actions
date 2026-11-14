@@ -34,8 +34,15 @@ DEB_DIR="$HOME/omniroute"
 # 旧轮在交出瞬间停 AI 栈后直接 tar 卷（不做 VACUUM/压缩，10-20s 完成），
 # 这里 rsync 直取（540MB，实测 88-150MB/s）+ 解包进卷，全程 ~15-30s。
 # 一致性：旧轮容器已停，卷是静树 → 裸 dump 与 VACUUM 快照等价。
-for _i in $(seq 1 36); do   # 最多 180s
-  if timeout 120 rsync -a --timeout=60 \
+# 2026-11-14 事故：旧轮 dump 出 2GB omnivol.tar，但单次 rsync 被 `timeout 120`
+# 中途杀掉（慢链路下 2GB 需要 >120s），循环重试又每次从头传 → 一直传不完；
+# 本地只剩 dump.rc + 10KB omnideploy，校验判失败后回退 Dropbox，最终 52 分钟才服务。
+# 修法：单次给 300s、加 --partial 可断点续传、总预算 600s（超时就走 Dropbox 回退）。
+_deadline=$(( $(date +%s) + 600 ))
+_i=0
+while [ "$(date +%s)" -lt "$_deadline" ]; do
+  _i=$((_i + 1))
+  if timeout 300 rsync -a --partial --timeout=60 \
       "rsync://${OLD_TS_IP}:${HANDOFF_RSYNC_PORT}/ai/" "$AI_PAYLOAD_DIR/" >/dev/null 2>&1 \
      && [ -f "$AI_PAYLOAD_DIR/dump.rc" ]; then
     if [ "$(cat "$AI_PAYLOAD_DIR/dump.rc" 2>/dev/null)" != "0" ] \
